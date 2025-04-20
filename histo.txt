@@ -1,0 +1,8 @@
+Référence Vol  Agence  Transaction  Valeur  Résultat
+3000 1 Demande 20 succès
+3000 1 Demande 10 succès
+4000 1 Demande 10 succès
+4000 1 Annulation 10 succès
+2000 1 Demande 60 impossible
+2000 1 Demande 3 succès
+3000 1 Demande 1 succès

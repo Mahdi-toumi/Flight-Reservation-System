@@ -1,0 +1,5 @@
+Référence Vol  Destination  Nombre Places  Prix Place
+1000 Paris 10 500
+2000 Medina 7 2500
+3000 Montréal 9 3500
+4000 Dubaï 15 3000
