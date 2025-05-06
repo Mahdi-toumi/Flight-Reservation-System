@@ -2,85 +2,88 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <netinet/in.h>
 #include <arpa/inet.h>
 
-#define PORT 8082
+#define PORT 8080
 #define BUFFER_SIZE 1024
 
-void afficherMenu() {
-    printf("\n===== Menu Agence =====\n");
-    printf("1. Réserver des places\n");
-    printf("2. Annuler une réservation\n");
-    printf("3. Quitter\n");
-    printf("4. Générer les factures\n"); 
-    printf("Choix : ");
-}
-
 int main() {
-    int sock;
+    int sockfd;
     struct sockaddr_in serv_addr;
-    char buffer[BUFFER_SIZE] = {0};
-    char requete[BUFFER_SIZE];
-    int choix, refVol, nbPlaces;
+    char buffer[BUFFER_SIZE];
+    char agence[50];
 
-    // Création du socket
-    if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
-        perror("Erreur socket");
-        return 1;
-    }
+    printf("Nom de l'agence : ");
+    scanf("%s", agence);
+
+    // Création socket
+    sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd < 0) { perror("socket"); exit(1); }
 
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_port = htons(PORT);
 
-    if (inet_pton(AF_INET, "127.0.0.1", &serv_addr.sin_addr) <= 0) {
-        perror("Adresse invalide");
-        return 1;
+	
+    if (inet_pton(AF_INET, "172.22.1.1", &serv_addr.sin_addr) <= 0) {
+        perror("Adresse invalide"); exit(1);
     }
 
-    if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
-        perror("Connexion échouée");
-        return 1;
+    // Connexion
+    if (connect(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
+        perror("connect"); exit(1);
     }
 
-    printf("Connecté au serveur.\n");
-
+    int choix;
     while (1) {
-        afficherMenu();
+        printf("\n--- MENU ---\n");
+        printf("1. Afficher tous les vols\n");
+        printf("2. Réserver un vol\n");
+        printf("3. Annuler une réservation\n");
+        printf("4. Voir la facture\n");
+        printf("0. Quitter\n");
+        printf("Choix : ");
         scanf("%d", &choix);
 
-        if (choix == 1 || choix == 2) {
-            printf("Entrez la référence du vol : ");
-            scanf("%d", &refVol);
-            printf("Entrez le nombre de places : ");
-            scanf("%d", &nbPlaces);
-
-            // Construire la requête à envoyer
-            sprintf(requete, "%s %d %d", (choix == 1 ? "DEMANDE" : "ANNULATION"), refVol, nbPlaces);
-            send(sock, requete, strlen(requete), 0);
-
-            // Lire la réponse du serveur
-            memset(buffer, 0, BUFFER_SIZE);
-            read(sock, buffer, BUFFER_SIZE);
-            printf("Réponse du serveur : %s\n", buffer);
-
-        } else if (choix == 3) {
-            printf("Déconnexion.\n");
-            break;
+        if (choix == 0) break;
+        switch (choix) {
+            case 1:
+                write(sockfd, "LIST", 4);
+                break;
+            case 2: {
+                int ref, nb;
+                printf("Vol réf : "); scanf("%d", &ref);
+                printf("Nb places : "); scanf("%d", &nb);
+                sprintf(buffer, "RESERVER %d %d %s", ref, nb, agence);
+                write(sockfd, buffer, strlen(buffer));
+                break;
+            }
+            case 3: {
+                int ref, nb;
+                printf("Vol réf à annuler : "); scanf("%d", &ref);
+                printf("Nb places : "); scanf("%d", &nb);
+                sprintf(buffer, "ANNULER %d %d %s", ref, nb, agence);
+                write(sockfd, buffer, strlen(buffer));
+                break;
+            }
+            case 4:
+                sprintf(buffer, "FACTURE %s", agence);
+                write(sockfd, buffer, strlen(buffer));
+                break;
+            default:
+                printf("Choix invalide\n");
+                continue;
         }
-	else if (choix == 4) {
-	    strcpy(requete, "FACTURE");
-	    send(sock, requete, strlen(requete), 0);
-	    memset(buffer, 0, BUFFER_SIZE);
-	    read(sock, buffer, BUFFER_SIZE);
-   	 printf("Réponse du serveur : %s\n", buffer);
-	}
 
-       	else {
-            printf("Choix invalide. Réessayez.\n");
+        // Lecture réponse
+        memset(buffer, 0, BUFFER_SIZE);
+        int n = read(sockfd, buffer, BUFFER_SIZE-1);
+        if (n > 0) {
+            buffer[n] = '\0';
+            printf("\n%s", buffer);
         }
     }
 
-    close(sock);
+    close(sockfd);
     return 0;
 }
-
