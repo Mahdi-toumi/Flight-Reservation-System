@@ -9,6 +9,7 @@
 #define VOL_FILE "vols.txt"
 #define HISTO_FILE "histo.txt"
 #define FACTURE_FILE "facture.txt"
+#define END_MARKER "END\n"
 
 // Enregistre chaque opération dans histo.txt
 void logHisto(int ref, const char *agence, const char *operation, int valeur, const char *resultat) {
@@ -55,6 +56,7 @@ void sendVols(int sock) {
     if (!f) {
         char *err = "Erreur : Impossible d’ouvrir vols.txt\n";
         write(sock, err, strlen(err));
+        write(sock, END_MARKER, strlen(END_MARKER));
         return;
     }
     char line[BUFFER_SIZE];
@@ -62,9 +64,7 @@ void sendVols(int sock) {
         write(sock, line, strlen(line));
     }
     fclose(f);
-
-    char *end = "END\n";
-    write(sock, end, strlen(end));
+    write(sock, END_MARKER, strlen(END_MARKER));
 }
 
 // Traite la réservation
@@ -77,6 +77,7 @@ void reserverVol(int sock, int ref, int nb_places, const char *agence) {
     if (!f || !tmp) {
         char *err = "Erreur : Fichier vols.txt introuvable\n";
         write(sock, err, strlen(err));
+        write(sock, END_MARKER, strlen(END_MARKER));
         return;
     }
 
@@ -92,6 +93,7 @@ void reserverVol(int sock, int ref, int nb_places, const char *agence) {
                     char msg[BUFFER_SIZE];
                     sprintf(msg, "Réservation confirmée : %d places vol %d\n", nb_places, ref);
                     write(sock, msg, strlen(msg));
+                    write(sock, END_MARKER, strlen(END_MARKER));
                     logHisto(ref, agence, "RESERVATION", nb_places, "OK");
                     updateFacture(agence, nb_places * prix);
                 } else {
@@ -99,6 +101,7 @@ void reserverVol(int sock, int ref, int nb_places, const char *agence) {
                     char msg[BUFFER_SIZE];
                     sprintf(msg, "Erreur : places insuffisantes (%d dispo)\n", places);
                     write(sock, msg, strlen(msg));
+                    write(sock, END_MARKER, strlen(END_MARKER));
                     logHisto(ref, agence, "RESERVATION", nb_places, "ECHEC");
                 }
             } else {
@@ -114,6 +117,7 @@ void reserverVol(int sock, int ref, int nb_places, const char *agence) {
     if (!trouvé) {
         char *msg = "Référence de vol introuvable\n";
         write(sock, msg, strlen(msg));
+        write(sock, END_MARKER, strlen(END_MARKER));
         remove("temp.txt");
         logHisto(ref, agence, "RESERVATION", nb_places, "INCONNU");
     } else {
@@ -132,6 +136,7 @@ void annulerVol(int sock, int ref, int nb_places, const char *agence) {
     if (!f || !tmp) {
         char *err = "Erreur : Fichier vols.txt introuvable\n";
         write(sock, err, strlen(err));
+        write(sock, END_MARKER, strlen(END_MARKER));
         return;
     }
 
@@ -148,6 +153,7 @@ void annulerVol(int sock, int ref, int nb_places, const char *agence) {
                 char msg[BUFFER_SIZE];
                 sprintf(msg, "Annulation de %d places vol %d (pénalité %d€)\n", nb_places, ref, penalite);
                 write(sock, msg, strlen(msg));
+                write(sock, END_MARKER, strlen(END_MARKER));
                 logHisto(ref, agence, "ANNULATION", nb_places, "OK");
             } else {
                 fprintf(tmp, "%s", line);
@@ -162,6 +168,7 @@ void annulerVol(int sock, int ref, int nb_places, const char *agence) {
     if (!trouvé) {
         char *msg = "Référence de vol introuvable\n";
         write(sock, msg, strlen(msg));
+        write(sock, END_MARKER, strlen(END_MARKER));
         remove("temp.txt");
         logHisto(ref, agence, "ANNULATION", nb_places, "INCONNU");
     } else {
@@ -188,10 +195,12 @@ void consulterFacture(int sock, const char *agence) {
             }
         }
         fclose(f);
+        write(sock, END_MARKER, strlen(END_MARKER));
     }
     if (!found) {
         char *msg = "Aucune facture pour cette agence\n";
         write(sock, msg, strlen(msg));
+        write(sock, END_MARKER, strlen(END_MARKER));
     }
 }
 
@@ -201,36 +210,30 @@ int main() {
     socklen_t clilen = sizeof(cli_addr);
     char buffer[BUFFER_SIZE];
 
-    // Création de la socket
     sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd < 0) {
         perror("socket");
         exit(1);
     }
 
-    // Autoriser le réutilisation immédiate du port
     int opt = 1;
     if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
         perror("setsockopt");
         exit(1);
     }
 
-    // Configuration de l'adresse
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_addr.s_addr = INADDR_ANY;
     serv_addr.sin_port = htons(PORT);
 
-    // Bind
     if (bind(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
         perror("bind");
         exit(1);
     }
 
-    // Écoute
     listen(sockfd, 5);
     printf("Serveur en attente sur port %d...\n", PORT);
 
-    // Boucle principale
     while (1) {
         newsockfd = accept(sockfd, (struct sockaddr *)&cli_addr, &clilen);
         if (newsockfd < 0) {
@@ -266,6 +269,7 @@ int main() {
             else {
                 char *msg = "Commande invalide\n";
                 write(newsockfd, msg, strlen(msg));
+                write(newsockfd, END_MARKER, strlen(END_MARKER));
             }
         }
         close(newsockfd);
@@ -274,4 +278,3 @@ int main() {
     close(sockfd);
     return 0;
 }
-
