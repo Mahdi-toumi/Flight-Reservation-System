@@ -3,6 +3,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <netinet/in.h>
+#include <pthread.h>
 
 #define PORT 8080
 #define BUFFER_SIZE 1024
@@ -11,33 +12,35 @@
 #define FACTURE_FILE "facture.txt"
 #define END_MARKER "END\n"
 
-// Enregistre chaque opération dans histo.txt
+pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+
 void logHisto(int ref, const char *agence, const char *operation, int valeur, const char *resultat) {
+    pthread_mutex_lock(&mutex);
     FILE *f = fopen(HISTO_FILE, "a");
     if (f) {
         fprintf(f, "%d %s %s %d %s\n", ref, agence, operation, valeur, resultat);
         fclose(f);
     }
+    pthread_mutex_unlock(&mutex);
 }
 
-// Met à jour la facture (ajoute montant) dans facture.txt
 void updateFacture(const char *agence, int montant) {
+    pthread_mutex_lock(&mutex);
     FILE *f = fopen(FACTURE_FILE, "r");
     FILE *tmp = fopen("temp_facture.txt", "w");
     char line[BUFFER_SIZE];
     int found = 0;
 
     if (!f) {
-        // Si le fichier facture.txt n'existe pas, on le crée
-        tmp = fopen("temp_facture.txt", "w");
-        if (!tmp) return;
+        if (!tmp) { pthread_mutex_unlock(&mutex); return; }
         fprintf(tmp, "%s %d\n", agence, montant);
         fclose(tmp);
         rename("temp_facture.txt", FACTURE_FILE);
+        pthread_mutex_unlock(&mutex);
         return;
     }
 
-    if (!tmp) return;
+    if (!tmp) { fclose(f); pthread_mutex_unlock(&mutex); return; }
 
     while (fgets(line, sizeof(line), f)) {
         char ag[50];
@@ -59,15 +62,17 @@ void updateFacture(const char *agence, int montant) {
     fclose(tmp);
     remove(FACTURE_FILE);
     rename("temp_facture.txt", FACTURE_FILE);
+    pthread_mutex_unlock(&mutex);
 }
 
-// Envoie la liste des vols au client
 void sendVols(int sock) {
+    pthread_mutex_lock(&mutex);
     FILE *f = fopen(VOL_FILE, "r");
     if (!f) {
         char *err = "Erreur : Impossible d’ouvrir vols.txt\n";
         write(sock, err, strlen(err));
         write(sock, END_MARKER, strlen(END_MARKER));
+        pthread_mutex_unlock(&mutex);
         return;
     }
     char line[BUFFER_SIZE];
@@ -75,11 +80,12 @@ void sendVols(int sock) {
         write(sock, line, strlen(line));
     }
     fclose(f);
+    pthread_mutex_unlock(&mutex);
     write(sock, END_MARKER, strlen(END_MARKER));
 }
 
-// Traite la réservation
 void reserverVol(int sock, int ref, int nb_places, const char *agence) {
+    pthread_mutex_lock(&mutex);
     FILE *f = fopen(VOL_FILE, "r");
     FILE *tmp = fopen("temp.txt", "w");
     char line[BUFFER_SIZE];
@@ -89,6 +95,7 @@ void reserverVol(int sock, int ref, int nb_places, const char *agence) {
         char *err = "Erreur : Fichier vols.txt introuvable\n";
         write(sock, err, strlen(err));
         write(sock, END_MARKER, strlen(END_MARKER));
+        pthread_mutex_unlock(&mutex);
         return;
     }
 
@@ -135,10 +142,11 @@ void reserverVol(int sock, int ref, int nb_places, const char *agence) {
         remove(VOL_FILE);
         rename("temp.txt", VOL_FILE);
     }
+    pthread_mutex_unlock(&mutex);
 }
 
-// Traite l'annulation avec pénalité 10%
 void annulerVol(int sock, int ref, int nb_places, const char *agence) {
+    pthread_mutex_lock(&mutex);
     FILE *f = fopen(VOL_FILE, "r");
     FILE *tmp = fopen("temp.txt", "w");
     char line[BUFFER_SIZE];
@@ -148,6 +156,7 @@ void annulerVol(int sock, int ref, int nb_places, const char *agence) {
         char *err = "Erreur : Fichier vols.txt introuvable\n";
         write(sock, err, strlen(err));
         write(sock, END_MARKER, strlen(END_MARKER));
+        pthread_mutex_unlock(&mutex);
         return;
     }
 
@@ -186,10 +195,11 @@ void annulerVol(int sock, int ref, int nb_places, const char *agence) {
         remove(VOL_FILE);
         rename("temp.txt", VOL_FILE);
     }
+    pthread_mutex_unlock(&mutex);
 }
 
-// Envoie la facture de l’agence
 void consulterFacture(int sock, const char *agence) {
+    pthread_mutex_lock(&mutex);
     FILE *f = fopen(FACTURE_FILE, "r");
     int found = 0;
     if (f) {
@@ -206,103 +216,106 @@ void consulterFacture(int sock, const char *agence) {
             }
         }
         fclose(f);
-        write(sock, END_MARKER, strlen(END_MARKER));
     }
     if (!found) {
         char *msg = "Aucune facture pour cette agence\n";
         write(sock, msg, strlen(msg));
-        write(sock, END_MARKER, strlen(END_MARKER));
     }
+    write(sock, END_MARKER, strlen(END_MARKER));
+    pthread_mutex_unlock(&mutex);
+}
+
+void *handle_client(void *arg) {
+    int sock = *((int *)arg);
+    free(arg);
+    char buffer[BUFFER_SIZE];
+
+    while (1) {
+        memset(buffer, 0, BUFFER_SIZE);
+        int n = read(sock, buffer, BUFFER_SIZE);
+        if (n <= 0) {
+            printf("Client déconnecté\n");
+            close(sock);
+            return NULL;
+        }
+
+        if (strncmp(buffer, "LIST", 4) == 0) {
+            sendVols(sock);
+        }
+        else if (strncmp(buffer, "RESERVER", 8) == 0) {
+            int ref, nb; char agence[50];
+            if (sscanf(buffer+9, "%d %d %s", &ref, &nb, agence) != 3) {
+                char *msg = "Commande RESERVER invalide\n";
+                write(sock, msg, strlen(msg));
+                write(sock, END_MARKER, strlen(END_MARKER));
+            } else {
+                reserverVol(sock, ref, nb, agence);
+            }
+        }
+        else if (strncmp(buffer, "ANNULER", 7) == 0) {
+            int ref, nb; char agence[50];
+            if (sscanf(buffer+8, "%d %d %s", &ref, &nb, agence) != 3) {
+                char *msg = "Commande ANNULER invalide\n";
+                write(sock, msg, strlen(msg));
+                write(sock, END_MARKER, strlen(END_MARKER));
+            } else {
+                annulerVol(sock, ref, nb, agence);
+            }
+        }
+        else if (strncmp(buffer, "FACTURE", 7) == 0) {
+            char agence[50];
+            if (sscanf(buffer+8, "%s", agence) != 1) {
+                char *msg = "Commande FACTURE invalide\n";
+                write(sock, msg, strlen(msg));
+                write(sock, END_MARKER, strlen(END_MARKER));
+            } else {
+                consulterFacture(sock, agence);
+            }
+        }
+        else {
+            char *msg = "Commande invalide\n";
+            write(sock, msg, strlen(msg));
+            write(sock, END_MARKER, strlen(END_MARKER));
+        }
+    }
+    return NULL;
 }
 
 int main() {
     int sockfd, newsockfd;
     struct sockaddr_in serv_addr, cli_addr;
     socklen_t clilen = sizeof(cli_addr);
-    char buffer[BUFFER_SIZE];
 
     sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd < 0) {
-        perror("socket");
-        exit(1);
-    }
+    if (sockfd < 0) { perror("socket"); exit(1); }
 
     int opt = 1;
-    if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
-        perror("setsockopt");
-        exit(1);
-    }
+    setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_addr.s_addr = INADDR_ANY;
     serv_addr.sin_port = htons(PORT);
 
     if (bind(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
-        perror("bind");
-        exit(1);
+        perror("bind"); exit(1);
     }
 
-    listen(sockfd, 5);
-    printf("Serveur en attente sur port %d...\n", PORT);
+    listen(sockfd, 10);
+    printf("Serveur en attente sur le port %d...\n", PORT);
 
     while (1) {
         newsockfd = accept(sockfd, (struct sockaddr *)&cli_addr, &clilen);
-        if (newsockfd < 0) {
-            perror("accept");
-            continue;
-        }
+        if (newsockfd < 0) { perror("accept"); continue; }
+
         printf("Client connecté\n");
-
-        while (1) {
-            memset(buffer, 0, BUFFER_SIZE);
-            int n = read(newsockfd, buffer, BUFFER_SIZE);
-            if (n <= 0) {
-                printf("Client déconnecté\n");
-                break;
-            }
-
-            if (strncmp(buffer, "LIST", 4) == 0) {
-                sendVols(newsockfd);
-            }
-            else if (strncmp(buffer, "RESERVER", 8) == 0) {
-                int ref, nb; char agence[50];
-                if (sscanf(buffer+9, "%d %d %s", &ref, &nb, agence) != 3) {
-                    char *msg = "Commande RESERVER invalide\n";
-                    write(newsockfd, msg, strlen(msg));
-                    write(newsockfd, END_MARKER, strlen(END_MARKER));
-                } else {
-                    reserverVol(newsockfd, ref, nb, agence);
-                }
-            }
-            else if (strncmp(buffer, "ANNULER", 7) == 0) {
-                int ref, nb; char agence[50];
-                if (sscanf(buffer+8, "%d %d %s", &ref, &nb, agence) != 3) {
-                    char *msg = "Commande ANNULER invalide\n";
-                    write(newsockfd, msg, strlen(msg));
-                    write(newsockfd, END_MARKER, strlen(END_MARKER));
-                } else {
-                    annulerVol(newsockfd, ref, nb, agence);
-                }
-            }
-            else if (strncmp(buffer, "FACTURE", 7) == 0) {
-                char agence[50];
-                if (sscanf(buffer+8, "%s", agence) != 1) {
-                    char *msg = "Commande FACTURE invalide\n";
-                    write(newsockfd, msg, strlen(msg));
-                    write(newsockfd, END_MARKER, strlen(END_MARKER));
-                } else {
-                    consulterFacture(newsockfd, agence);
-                }
-            }
-            else {
-                char *msg = "Commande invalide\n";
-                write(newsockfd, msg, strlen(msg));
-                write(newsockfd, END_MARKER, strlen(END_MARKER));
-            }
-        }
-        close(newsockfd);
+        int *pclient = malloc(sizeof(int));
+        *pclient = newsockfd;
+        pthread_t tid;
+        pthread_create(&tid, NULL, handle_client, pclient);
+        pthread_detach(tid);  // Pas besoin de join
     }
 
     close(sockfd);
+    pthread_mutex_destroy(&mutex);
     return 0;
 }
