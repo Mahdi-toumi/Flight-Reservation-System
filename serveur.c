@@ -62,6 +62,9 @@ void sendVols(int sock) {
         write(sock, line, strlen(line));
     }
     fclose(f);
+
+    char *end = "END\n";
+    write(sock, end, strlen(end));
 }
 
 // Traite la réservation
