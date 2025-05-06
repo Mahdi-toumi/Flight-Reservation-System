@@ -27,7 +27,17 @@ void updateFacture(const char *agence, int montant) {
     char line[BUFFER_SIZE];
     int found = 0;
 
-    if (!f || !tmp) return;
+    if (!f) {
+        // Si le fichier facture.txt n'existe pas, on le crée
+        tmp = fopen("temp_facture.txt", "w");
+        if (!tmp) return;
+        fprintf(tmp, "%s %d\n", agence, montant);
+        fclose(tmp);
+        rename("temp_facture.txt", FACTURE_FILE);
+        return;
+    }
+
+    if (!tmp) return;
 
     while (fgets(line, sizeof(line), f)) {
         char ag[50];
@@ -40,6 +50,7 @@ void updateFacture(const char *agence, int montant) {
             fprintf(tmp, "%s %d\n", ag, somme);
         }
     }
+
     if (!found) {
         fprintf(tmp, "%s %d\n", agence, montant);
     }
@@ -250,21 +261,38 @@ int main() {
                 break;
             }
 
-            if      (strncmp(buffer, "LIST", 4) == 0)      sendVols(newsockfd);
-            else if (strncmp(buffer, "RESERVER", 8) == 0)  {
-                int ref, nb; char agence[50];
-                sscanf(buffer+9, "%d %d %s", &ref, &nb, agence);
-                reserverVol(newsockfd, ref, nb, agence);
+            if (strncmp(buffer, "LIST", 4) == 0) {
+                sendVols(newsockfd);
             }
-            else if (strncmp(buffer, "ANNULER", 7) == 0)   {
+            else if (strncmp(buffer, "RESERVER", 8) == 0) {
                 int ref, nb; char agence[50];
-                sscanf(buffer+8, "%d %d %s", &ref, &nb, agence);
-                annulerVol(newsockfd, ref, nb, agence);
+                if (sscanf(buffer+9, "%d %d %s", &ref, &nb, agence) != 3) {
+                    char *msg = "Commande RESERVER invalide\n";
+                    write(newsockfd, msg, strlen(msg));
+                    write(newsockfd, END_MARKER, strlen(END_MARKER));
+                } else {
+                    reserverVol(newsockfd, ref, nb, agence);
+                }
             }
-            else if (strncmp(buffer, "FACTURE", 7) == 0)   {
+            else if (strncmp(buffer, "ANNULER", 7) == 0) {
+                int ref, nb; char agence[50];
+                if (sscanf(buffer+8, "%d %d %s", &ref, &nb, agence) != 3) {
+                    char *msg = "Commande ANNULER invalide\n";
+                    write(newsockfd, msg, strlen(msg));
+                    write(newsockfd, END_MARKER, strlen(END_MARKER));
+                } else {
+                    annulerVol(newsockfd, ref, nb, agence);
+                }
+            }
+            else if (strncmp(buffer, "FACTURE", 7) == 0) {
                 char agence[50];
-                sscanf(buffer+8, "%s", agence);
-                consulterFacture(newsockfd, agence);
+                if (sscanf(buffer+8, "%s", agence) != 1) {
+                    char *msg = "Commande FACTURE invalide\n";
+                    write(newsockfd, msg, strlen(msg));
+                    write(newsockfd, END_MARKER, strlen(END_MARKER));
+                } else {
+                    consulterFacture(newsockfd, agence);
+                }
             }
             else {
                 char *msg = "Commande invalide\n";
