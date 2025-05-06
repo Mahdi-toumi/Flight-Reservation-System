@@ -14,8 +14,11 @@ int main() {
     char buffer[BUFFER_SIZE];
     char agence[50];
 
-    printf("Nom de l'agence : ");
-    scanf("%s", agence);
+    char *exe_name = basename(argv[0]); 
+    strncpy(agence, exe_name, sizeof(agence));
+    agence[sizeof(agence) - 1] = '\0'; 
+
+    printf("Nom de l'agence détecté : %s\n", agence);
 
     // Création socket
     sockfd = socket(AF_INET, SOCK_STREAM, 0);
