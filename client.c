@@ -76,12 +76,19 @@ int main() {
         }
 
         // Lecture réponse
-        memset(buffer, 0, BUFFER_SIZE);
-        int n = read(sockfd, buffer, BUFFER_SIZE-1);
-        if (n > 0) {
-            buffer[n] = '\0';
-            printf("\n%s", buffer);
-        }
+        printf("\n");
+	while (1) {
+	    memset(buffer, 0, BUFFER_SIZE);
+	    int n = read(sockfd, buffer, BUFFER_SIZE - 1);
+	    if (n <= 0) break;
+	    buffer[n] = '\0';
+	
+	    if (strcmp(buffer, "END\n") == 0 || strcmp(buffer, "END\r\n") == 0) {
+	        break;
+	    }
+	
+	    printf("%s", buffer);
+	}
     }
 
     close(sockfd);
