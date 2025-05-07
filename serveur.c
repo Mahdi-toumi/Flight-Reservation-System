@@ -369,7 +369,7 @@ void annulerVol(int sock, struct sockaddr_in *cli_addr, socklen_t cli_len, int r
                     int penalite = (int)(montant_reserve * 0.1); // Pénalité de 10%
                     updateFacture(sock, cli_addr, cli_len, agence, -montant_reserve + penalite, proto, seq); // Soustrait le montant réservé et ajoute la pénalité
                     char msg[BUFFER_SIZE];
-                    snprintf(msg, sizeof(msg), "Cancellation confirmed: %d seats on flight %d (penalty %d€)\n", nb_places, ref, penalite);
+                    snprintf(msg, sizeof(msg), "Cancellation confirmed: %d seats on flight %d (penalty %d Dt)\n", nb_places, ref, penalite);
                     if (proto == PROTO_TCP) {
                         if (write(sock, msg, strlen(msg)) < 0) {
                             perror("Failed to send cancellation confirmation");
@@ -436,7 +436,7 @@ void annulerVol(int sock, struct sockaddr_in *cli_addr, socklen_t cli_len, int r
 
 void consulterFacture(int sock, struct sockaddr_in *cli_addr, socklen_t cli_len, const char *agence, Protocol proto, uint32_t seq) {
     char debug_msg[BUFFER_SIZE];
-    snprintf(debug_msg, sizeof(debug_msg), "Fetching invoice for agency %s", agence);
+    snprintf(debug_msg, sizeof(debug_msg), "Fetching Facture for agency %s", agence);
     debug_print(debug_msg, cli_addr, sock);
     
     if (pthread_mutex_trylock(&facture_mutex) != 0) {
@@ -452,10 +452,10 @@ void consulterFacture(int sock, struct sockaddr_in *cli_addr, socklen_t cli_len,
             int montant;
             if (sscanf(line, "%s %d", ag, &montant) == 2 && strcmp(ag, agence) == 0) {
                 char msg[BUFFER_SIZE];
-                snprintf(msg, sizeof(msg), "Invoice for %s: %d€\n", agence, montant);
+                snprintf(msg, sizeof(msg), "Facture for %s: %d€\n", agence, montant);
                 if (proto == PROTO_TCP) {
                     if (write(sock, msg, strlen(msg)) < 0) {
-                        perror("Failed to send invoice");
+                        perror("Failed to send Facture");
                     }
                 } else {
                     UdpHeader header = { seq, "FACT", (uint32_t)strlen(msg) };
