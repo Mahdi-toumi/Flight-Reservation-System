@@ -9,12 +9,20 @@
 #define PORT 8080
 #define BUFFER_SIZE 1024
 
-// Nouvelle fonction : lit un message précédé de sa taille
 int read_message(int sock, char *buffer, int bufsize) {
     int len;
     int n = read(sock, &len, sizeof(int));
     if (n <= 0 || len <= 0 || len >= bufsize) return -1;
-    return read(sock, buffer, len);
+
+    int total_read = 0;
+    while (total_read < len) {
+        int r = read(sock, buffer + total_read, len - total_read);
+        if (r <= 0) return -1;
+        total_read += r;
+    }
+
+    buffer[total_read] = '\0';
+    return total_read;
 }
 
 int main(int argc, char *argv[]) {
@@ -53,7 +61,9 @@ int main(int argc, char *argv[]) {
         exit(1);
     }
 
+    char input[100];
     int choix;
+
     while (1) {
         printf("\n--- MENU ---\n");
         printf("1. Afficher tous les vols\n");
@@ -62,9 +72,10 @@ int main(int argc, char *argv[]) {
         printf("4. Voir la facture\n");
         printf("0. Quitter\n");
         printf("Choix : ");
-        if (scanf("%d", &choix) != 1) {
+
+        fgets(input, sizeof(input), stdin);
+        if (sscanf(input, "%d", &choix) != 1) {
             fprintf(stderr, "Entrée invalide.\n");
-            while (getchar() != '\n');
             continue;
         }
 
@@ -76,16 +87,28 @@ int main(int argc, char *argv[]) {
                 break;
             case 2: {
                 int ref, nb;
-                printf("Vol réf : "); scanf("%d", &ref);
-                printf("Nb places : "); scanf("%d", &nb);
+                printf("Vol réf : ");
+                fgets(input, sizeof(input), stdin);
+                if (sscanf(input, "%d", &ref) != 1) { printf("Réf invalide\n"); continue; }
+
+                printf("Nb places : ");
+                fgets(input, sizeof(input), stdin);
+                if (sscanf(input, "%d", &nb) != 1) { printf("Nb invalide\n"); continue; }
+
                 snprintf(buffer, BUFFER_SIZE, "RESERVER %d %d %s", ref, nb, agence);
                 write(sockfd, buffer, strlen(buffer));
                 break;
             }
             case 3: {
                 int ref, nb;
-                printf("Vol réf à annuler : "); scanf("%d", &ref);
-                printf("Nb places : "); scanf("%d", &nb);
+                printf("Vol réf à annuler : ");
+                fgets(input, sizeof(input), stdin);
+                if (sscanf(input, "%d", &ref) != 1) { printf("Réf invalide\n"); continue; }
+
+                printf("Nb places : ");
+                fgets(input, sizeof(input), stdin);
+                if (sscanf(input, "%d", &nb) != 1) { printf("Nb invalide\n"); continue; }
+
                 snprintf(buffer, BUFFER_SIZE, "ANNULER %d %d %s", ref, nb, agence);
                 write(sockfd, buffer, strlen(buffer));
                 break;
@@ -101,10 +124,10 @@ int main(int argc, char *argv[]) {
 
         int n = read_message(sockfd, buffer, BUFFER_SIZE);
         if (n > 0) {
-            buffer[n] = '\0';
             printf("\n%s", buffer);
         } else {
-            printf("Erreur de lecture.\n");
+            printf("Erreur de lecture depuis le serveur.\n");
+            continue;
         }
     }
 
