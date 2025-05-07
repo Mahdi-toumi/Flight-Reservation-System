@@ -5,28 +5,26 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <errno.h>
+#include <libgen.h>
 
 #define PORT 8080
 #define BUFFER_SIZE 1024
 
-int main() {
+int main(int argc, char *argv[]) {
     int sockfd = -1;
     struct sockaddr_in serv_addr;
     char buffer[BUFFER_SIZE];
     char agence[50];
 
-    // Input validation for agency name
-    printf("Nom de l'agence : ");
-    if (fgets(agence, sizeof(agence), stdin) == NULL) {
-        fprintf(stderr, "Erreur de lecture du nom de l'agence\n");
-        return 1;
-    }
-    agence[strcspn(agence, "\n")] = 0; // Remove newline
+    // Get agency name from executable name
+    char *exec_name = basename(argv[0]); // Extract base name (e.g., "Mahdi" from "./Mahdi")
+    strncpy(agence, exec_name, sizeof(agence) - 1);
+    agence[sizeof(agence) - 1] = '\0'; // Ensure null-termination
     if (strlen(agence) == 0) {
-        fprintf(stderr, "Nom de l'agence vide\n");
+        fprintf(stderr, "%s: Nom de l'agence vide\n", argv[0]);
         return 1;
     }
-    printf("Agence saisie : %s\n", agence); // Debug output
+    printf("%s: Agence saisie : %s\n", argv[0], agence); // Debug output with executable name
 
     // Create socket
     sockfd = socket(AF_INET, SOCK_STREAM, 0);
@@ -34,7 +32,7 @@ int main() {
         perror("Erreur création socket");
         return 1;
     }
-    printf("Socket créé avec succès\n"); // Debug output
+    printf("%s: Socket créé avec succès\n", argv[0]); // Debug output
 
     // Configure server address
     memset(&serv_addr, 0, sizeof(serv_addr));
@@ -45,7 +43,7 @@ int main() {
         close(sockfd);
         return 1;
     }
-    printf("Adresse serveur configurée\n"); // Debug output
+    printf("%s: Adresse serveur configurée\n", argv[0]); // Debug output
 
     // Connect to server
     if (connect(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
@@ -53,7 +51,7 @@ int main() {
         close(sockfd);
         return 1;
     }
-    printf("Connexion au serveur établie\n"); // Debug output
+    printf("%s: Connexion au serveur établie\n", argv[0]); // Debug output
 
     int choix;
     while (1) {
@@ -66,13 +64,13 @@ int main() {
         printf("Choix : ");
         if (scanf("%d", &choix) != 1) {
             while (getchar() != '\n'); // Clear invalid input
-            printf("Choix invalide\n");
+            printf("%s: Choix invalide\n", argv[0]);
             continue;
         }
         while (getchar() != '\n'); // Clear input buffer
 
         if (choix == 0) {
-            printf("Déconnexion...\n");
+            printf("%s: Déconnexion...\n", argv[0]);
             break;
         }
 
@@ -85,7 +83,7 @@ int main() {
                     close(sockfd);
                     return 1;
                 }
-                printf("Commande LIST envoyée\n"); // Debug output
+                printf("%s: Commande LIST envoyée\n", argv[0]); // Debug output
                 printf("\nListe des vols :\n");
                 while (1) {
                     ssize_t n = read(sockfd, buffer, BUFFER_SIZE - 1);
@@ -95,18 +93,18 @@ int main() {
                         return 1;
                     }
                     if (n == 0) {
-                        printf("Connexion fermée par le serveur\n");
+                        printf("%s: Connexion fermée par le serveur\n", argv[0]);
                         close(sockfd);
                         return 1;
                     }
                     buffer[n] = '\0';
                     printf("%s", buffer); // Print each chunk
                     if (strstr(buffer, "END\n") != NULL) {
-                        printf("Marqueur END reçu\n"); // Debug output
+                        printf("%s: Marqueur END reçu\n", argv[0]); // Debug output
                         break;
                     }
                 }
-                printf("Liste des vols affichée\n"); // Debug output
+                printf("%s: Liste des vols affichée\n", argv[0]); // Debug output
                 break;
             }
 
@@ -114,13 +112,13 @@ int main() {
                 int ref, nb;
                 printf("Référence du vol : ");
                 if (scanf("%d", &ref) != 1 || ref < 0) {
-                    printf("Référence invalide\n");
+                    printf("%s: Référence invalide\n", argv[0]);
                     while (getchar() != '\n');
                     continue;
                 }
                 printf("Nombre de places : ");
                 if (scanf("%d", &nb) != 1 || nb <= 0) {
-                    printf("Nombre de places invalide\n");
+                    printf("%s: Nombre de places invalide\n", argv[0]);
                     while (getchar() != '\n');
                     continue;
                 }
@@ -132,7 +130,7 @@ int main() {
                     close(sockfd);
                     return 1;
                 }
-                printf("Commande RESERVER envoyée\n"); // Debug output
+                printf("%s: Commande RESERVER envoyée\n", argv[0]); // Debug output
                 break;
             }
 
@@ -140,13 +138,13 @@ int main() {
                 int ref, nb;
                 printf("Référence du vol à annuler : ");
                 if (scanf("%d", &ref) != 1 || ref < 0) {
-                    printf("Référence invalide\n");
+                    printf("%s: Référence invalide\n", argv[0]);
                     while (getchar() != '\n');
                     continue;
                 }
                 printf("Nombre de places à annuler : ");
                 if (scanf("%d", &nb) != 1 || nb <= 0) {
-                    printf("Nombre de places invalide\n");
+                    printf("%s: Nombre de places invalide\n", argv[0]);
                     while (getchar() != '\n');
                     continue;
                 }
@@ -158,7 +156,7 @@ int main() {
                     close(sockfd);
                     return 1;
                 }
-                printf("Commande ANNULER envoyée\n"); // Debug output
+                printf("%s: Commande ANNULER envoyée\n", argv[0]); // Debug output
                 break;
             }
 
@@ -170,12 +168,12 @@ int main() {
                     close(sockfd);
                     return 1;
                 }
-                printf("Commande FACTURE envoyée\n"); // Debug output
+                printf("%s: Commande FACTURE envoyée\n", argv[0]); // Debug output
                 break;
             }
 
             default:
-                printf("Choix invalide\n");
+                printf("%s: Choix invalide\n", argv[0]);
                 continue;
         }
 
@@ -187,16 +185,16 @@ int main() {
                 return 1;
             }
             if (n == 0) {
-                printf("Connexion fermée par le serveur\n");
+                printf("%s: Connexion fermée par le serveur\n", argv[0]);
                 close(sockfd);
                 return 1;
             }
             buffer[n] = '\0';
-            printf("Réponse :\n%s\n", buffer);
+            printf("%s: Réponse :\n%s\n", argv[0], buffer);
         }
     }
 
     close(sockfd);
-    printf("Connexion fermée\n"); // Debug output
+    printf("%s: Connexion fermée\n", argv[0]); // Debug output
     return 0;
 }
