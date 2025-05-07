@@ -4,10 +4,18 @@
 #include <unistd.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <libgen.h>  // Pour basename
+#include <libgen.h>
 
 #define PORT 8080
 #define BUFFER_SIZE 1024
+
+// Nouvelle fonction : lit un message précédé de sa taille
+int read_message(int sock, char *buffer, int bufsize) {
+    int len;
+    int n = read(sock, &len, sizeof(int));
+    if (n <= 0 || len <= 0 || len >= bufsize) return -1;
+    return read(sock, buffer, len);
+}
 
 int main(int argc, char *argv[]) {
     int sockfd;
@@ -20,14 +28,12 @@ int main(int argc, char *argv[]) {
         exit(1);
     }
 
-    // Récupération du nom de l'exécutable comme nom d'agence
     char *exe_name = basename(argv[0]);
     strncpy(agence, exe_name, sizeof(agence) - 1);
     agence[sizeof(agence) - 1] = '\0';
 
     printf("Nom de l'agence détecté : %s\n", agence);
 
-    // Création de la socket
     sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd < 0) {
         perror("socket");
@@ -42,7 +48,6 @@ int main(int argc, char *argv[]) {
         exit(1);
     }
 
-    // Connexion au serveur
     if (connect(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
         perror("connect");
         exit(1);
@@ -59,7 +64,7 @@ int main(int argc, char *argv[]) {
         printf("Choix : ");
         if (scanf("%d", &choix) != 1) {
             fprintf(stderr, "Entrée invalide.\n");
-            while (getchar() != '\n');  // Vider le buffer
+            while (getchar() != '\n');
             continue;
         }
 
@@ -69,7 +74,6 @@ int main(int argc, char *argv[]) {
             case 1:
                 write(sockfd, "LIST", 4);
                 break;
-
             case 2: {
                 int ref, nb;
                 printf("Vol réf : "); scanf("%d", &ref);
@@ -78,7 +82,6 @@ int main(int argc, char *argv[]) {
                 write(sockfd, buffer, strlen(buffer));
                 break;
             }
-
             case 3: {
                 int ref, nb;
                 printf("Vol réf à annuler : "); scanf("%d", &ref);
@@ -87,31 +90,21 @@ int main(int argc, char *argv[]) {
                 write(sockfd, buffer, strlen(buffer));
                 break;
             }
-
             case 4:
                 snprintf(buffer, BUFFER_SIZE, "FACTURE %s", agence);
                 write(sockfd, buffer, strlen(buffer));
                 break;
-
             default:
                 printf("Choix invalide\n");
                 continue;
         }
 
-        // Lecture de la réponse du serveur
-        printf("\n");
-        while (1) {
-            memset(buffer, 0, BUFFER_SIZE);
-            int n = read(sockfd, buffer, BUFFER_SIZE - 1);
-            if (n <= 0) break;
-
+        int n = read_message(sockfd, buffer, BUFFER_SIZE);
+        if (n > 0) {
             buffer[n] = '\0';
-
-            if (strcmp(buffer, "END\n") == 0 || strcmp(buffer, "END\r\n") == 0) {
-                break;
-            }
-
-            printf("%s", buffer);
+            printf("\n%s", buffer);
+        } else {
+            printf("Erreur de lecture.\n");
         }
     }
 
