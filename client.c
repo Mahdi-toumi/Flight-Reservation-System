@@ -163,13 +163,13 @@ int main(int argc, char *argv[]) {
 
     int choix;
     while (1) {
-        printf("\n===== Flight Reservation Menu =====\n");
-        printf("1. List all flights\n");
-        printf("2. Reserve a flight\n");
-        printf("3. Cancel a reservation\n");
-        printf("4. View invoice\n");
+        printf("\n===== Menu de Réservation de Vol =====\n");
+        printf("1. Afficher tous les vols\n");
+        printf("2. Réserver un vol\n");
+        printf("3. Annuler une reservation\n");
+        printf("4. Consulter Facture\n");
         printf("0. Exit\n");
-        printf("Enter choice: ");
+        printf("Entrer votre choix: ");
         if (scanf("%d", &choix) != 1) {
             while (getchar() != '\n');
             printf("Invalid choice\n");
@@ -219,7 +219,7 @@ int main(int argc, char *argv[]) {
             }
         }
     } else { // UDP
-        printf("\nAvailable Flights:\n");
+        printf("\nVols disponibles\n");
         // Send a single LIST request
         ssize_t n = send_udp_request(sockfd, &serv_addr, buffer, len, buffer, BUFFER_SIZE);
         if (n < 0) {
@@ -277,13 +277,13 @@ int main(int argc, char *argv[]) {
 
             case 2: {
                 int ref, nb;
-                printf("Enter flight reference: ");
+                printf("Entrez la référence du vol :");
                 if (scanf("%d", &ref) != 1 || ref < 0) {
                     printf("Invalid flight reference\n");
                     while (getchar() != '\n');
                     continue;
                 }
-                printf("Enter number of seats: ");
+                printf("Entrez le nombre de places :");
                 if (scanf("%d", &nb) != 1 || nb <= 0) {
                     printf("Invalid number of seats\n");
                     while (getchar() != '\n');
@@ -310,13 +310,13 @@ int main(int argc, char *argv[]) {
 
             case 3: {
                 int ref, nb;
-                printf("Enter flight reference to cancel: ");
+                printf("Entrez la référence du vol a annuler : ");
                 if (scanf("%d", &ref) != 1 || ref < 0) {
                     printf("Invalid flight reference\n");
                     while (getchar() != '\n');
                     continue;
                 }
-                printf("Enter number of seats to cancel: ");
+                printf("Entrez le nombre de places a annuler:");
                 if (scanf("%d", &nb) != 1 || nb <= 0) {
                     printf("Invalid number of seats\n");
                     while (getchar() != '\n');
@@ -346,7 +346,7 @@ int main(int argc, char *argv[]) {
                 size_t len = strlen(buffer);
                 if (proto == PROTO_TCP) {
                     if (write(sockfd, buffer, len) != len) {
-                        perror("Failed to send invoice request");
+                        perror("Failed to send facture request");
                         close(sockfd);
                         return 1;
                     }
