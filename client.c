@@ -5,174 +5,395 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <errno.h>
+#include <libgen.h>
+#include <sys/select.h>
 #include <time.h>
 
-// Définitions des constantes
-#define PORT 8080 // Port du serveur
-#define BUFFER_SIZE 1024 // Taille maximale des buffers pour les messages
-#define MAX_DATAGRAM_SIZE 512 // Taille maximale des datagrammes UDP
-#define SERVER_IP "127.0.0.1" // Adresse IP du serveur
+#define PORT 8080
+#define BUFFER_SIZE 1024
+#define MAX_DATAGRAM_SIZE 512
+#define UDP_TIMEOUT_SEC 1
+#define UDP_MAX_RETRIES 3
 
-// Enumération pour les protocoles supportés
 typedef enum { PROTO_TCP, PROTO_UDP } Protocol;
 
-// Structure pour l'en-tête des messages UDP
+// UDP message header
 typedef struct {
-    uint32_t seq; // Numéro de séquence du message
-    char type[5]; // Type de message (ex. LIST, RSRV) + terminateur nul
-    uint32_t len; // Longueur de la charge utile
+    uint32_t seq; // Sequence number
+    char type[5]; // Message type (e.g., LIST, WAIT) + null terminator
+    uint32_t len; // Payload length
 } UdpHeader;
 
-// Affiche un message de débogage avec horodatage
-void debug_print(const char *msg, int sockfd) {
-    time_t now = time(NULL);
-    struct tm *t = localtime(&now);
-    char time_str[20];
-    strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", t);
-    printf("[DEBUG] %s: %s (socket %d)\n", time_str, msg, sockfd);
-}
-
-// Crée un socket pour le protocole spécifié
 int create_socket(Protocol proto) {
-    // Créer un socket TCP ou UDP selon le protocole
     int sockfd = socket(AF_INET, proto == PROTO_TCP ? SOCK_STREAM : SOCK_DGRAM, 0);
     if (sockfd < 0) {
-        perror("Échec de la création du socket");
+        perror("Failed to create socket");
         return -1;
     }
-    debug_print("Socket créé avec succès", sockfd);
     return sockfd;
 }
 
-// Programme principal
+int send_udp_request(int sockfd, struct sockaddr_in *serv_addr, char *buffer, size_t len, char *response, size_t resp_size) {
+    static uint32_t seq = 0;
+    UdpHeader header = { seq++, "", (uint32_t)len };
+    strncpy(header.type, strncmp(buffer, "LIST", 4) == 0 ? "LIST" : 
+                        strncmp(buffer, "RESERVER", 8) == 0 ? "RSRV" : 
+                        strncmp(buffer, "ANNULER", 7) == 0 ? "ANUL" : 
+                        strncmp(buffer, "FACTURE", 7) == 0 ? "FACT" : "UNKN", 5);
+
+    char packet[MAX_DATAGRAM_SIZE];
+    memcpy(packet, &header, sizeof(UdpHeader));
+    memcpy(packet + sizeof(UdpHeader), buffer, len);
+    size_t packet_len = sizeof(UdpHeader) + len;
+
+    struct timeval tv = { UDP_TIMEOUT_SEC, 0 };
+    int retries = 0;
+    ssize_t n;
+
+    while (retries < UDP_MAX_RETRIES) {
+        if (sendto(sockfd, packet, packet_len, 0, (struct sockaddr *)serv_addr, sizeof(*serv_addr)) < 0) {
+            perror("Failed to send UDP packet");
+            return -1;
+        }
+
+        fd_set readfds;
+        FD_ZERO(&readfds);
+        FD_SET(sockfd, &readfds);
+        int ready = select(sockfd + 1, &readfds, NULL, NULL, &tv);
+        if (ready < 0) {
+            perror("Error in select");
+            return -1;
+        }
+        if (ready == 0) {
+            retries++;
+            printf("Timeout, retry %d/%d\n", retries, UDP_MAX_RETRIES);
+            continue;
+        }
+
+        struct sockaddr_in from_addr;
+        socklen_t from_len = sizeof(from_addr);
+        n = recvfrom(sockfd, packet, MAX_DATAGRAM_SIZE, 0, (struct sockaddr *)&from_addr, &from_len);
+        if (n < 0) {
+            perror("Failed to receive UDP packet");
+            return -1;
+        }
+
+        if (n < sizeof(UdpHeader)) {
+            printf("Received datagram too short\n");
+            continue;
+        }
+
+        UdpHeader recv_header;
+        memcpy(&recv_header, packet, sizeof(UdpHeader));
+        if (recv_header.seq != header.seq) {
+            printf("Incorrect sequence number, ignoring\n");
+            continue;
+        }
+
+        size_t payload_len = n - sizeof(UdpHeader);
+        if (payload_len > resp_size - 1) {
+            payload_len = resp_size - 1;
+        }
+        memcpy(response, packet + sizeof(UdpHeader), payload_len);
+        response[payload_len] = '\0';
+
+        if (strncmp(recv_header.type, "WAIT", 4) == 0) {
+            printf("%s\n", response);
+            continue; // Wait for next packet
+        }
+
+        return payload_len;
+    }
+
+    printf("Failed after %d retries\n", UDP_MAX_RETRIES);
+    return -1;
+}
+
 int main(int argc, char *argv[]) {
-    // Vérifier les arguments
-    if (argc != 2 || (strcmp(argv[1], "tcp") != 0 && strcmp(argv[1], "udp") != 0)) {
-        fprintf(stderr, "Usage: %s <tcp|udp>\n", argv[0]);
+    Protocol proto = PROTO_TCP;
+    if (argc > 1) {
+        if (strcmp(argv[1], "tcp") == 0) {
+            proto = PROTO_TCP;
+        } else if (strcmp(argv[1], "udp") == 0) {
+            proto = PROTO_UDP;
+        } else {
+            fprintf(stderr, "Invalid protocol (use 'tcp' or 'udp')\n");
+            return 1;
+        }
+    }
+
+    int sockfd = -1;
+    struct sockaddr_in serv_addr;
+    char buffer[BUFFER_SIZE];
+    char agence[50];
+
+    // Get agency name from executable name
+    char *exec_name = basename(argv[0]);
+    strncpy(agence, exec_name, sizeof(agence) - 1);
+    agence[sizeof(agence) - 1] = '\0';
+    if (strlen(agence) == 0) {
+        fprintf(stderr, "Agency name cannot be empty\n");
         return 1;
     }
-    Protocol proto = strcmp(argv[1], "tcp") == 0 ? PROTO_TCP : PROTO_UDP;
 
-    // Créer le socket
-    int sockfd = create_socket(proto);
+    // Create socket
+    sockfd = create_socket(proto);
     if (sockfd < 0) {
         return 1;
     }
 
-    // Configurer l'adresse du serveur
-    struct sockaddr_in serv_addr;
+    // Configure server address
     memset(&serv_addr, 0, sizeof(serv_addr));
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_port = htons(PORT);
-    if (inet_pton(AF_INET, SERVER_IP, &serv_addr.sin_addr) <= 0) {
-        perror("Adresse IP invalide");
+    if (inet_pton(AF_INET, "127.0.0.1", &serv_addr.sin_addr) <= 0) {
+        perror("Invalid server IP address");
         close(sockfd);
         return 1;
     }
 
+    // Connect for TCP
     if (proto == PROTO_TCP) {
-        // Établir une connexion TCP
         if (connect(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
-            perror("Échec de la connexion au serveur");
+            perror("Failed to connect to server");
             close(sockfd);
             return 1;
         }
-        debug_print("Connexion TCP établie", sockfd);
+    }
 
-        char command[BUFFER_SIZE];
-        char response[BUFFER_SIZE];
+    int choix;
+    while (1) {
+        printf("\n===== Menu de Réservation de Vol =====\n");
+        printf("1. Afficher tous les vols\n");
+        printf("2. Réserver un vol\n");
+        printf("3. Annuler une reservation\n");
+        printf("4. Consulter Facture\n");
+        printf("0. Exit\n");
+        printf("Entrer votre choix: ");
+        if (scanf("%d", &choix) != 1) {
+            while (getchar() != '\n');
+            printf("Invalid choice\n");
+            continue;
+        }
+        while (getchar() != '\n');
+
+        if (choix == 0) {
+            printf("Disconnecting...\n");
+            break;
+        }
+
+        memset(buffer, 0, BUFFER_SIZE);
+
+        switch (choix) {
+            case 1: {
+    strncpy(buffer, "LIST", 5);
+    size_t len = strlen(buffer);
+    if (proto == PROTO_TCP) {
+        // TCP handling remains unchanged
+        if (write(sockfd, buffer, len) != len) {
+            perror("Failed to send LIST command");
+            close(sockfd);
+            return 1;
+        }
+        printf("\nAvailable Flights:\n");
         while (1) {
-            // Lire la commande de l'utilisateur
-            printf("Entrez une commande (LIST, RESERVER <ref> <nb> <agence>, ANNULER <ref> <nb> <agence>, FACTURE <agence>, ou quit pour quitter) : ");
-            if (fgets(command, sizeof(command), stdin) == NULL) {
-                break;
+            ssize_t n = read(sockfd, buffer, BUFFER_SIZE - 1);
+            if (n < 0) {
+                perror("Error reading LIST response");
+                close(sockfd);
+                return 1;
             }
-            command[strcspn(command, "\n")] = '\0';
-            if (strcmp(command, "quit") == 0) {
-                break;
+            if (n == 0) {
+                printf("Server closed connection\n");
+                close(sockfd);
+                return 1;
             }
-
-            // Envoyer la commande au serveur
-            if (write(sockfd, command, strlen(command)) < 0) {
-                perror("Échec de l'envoi de la commande");
-                break;
+            buffer[n] = '\0';
+            if (strncmp(buffer, "WAIT", 4) == 0) {
+                printf("%s\n", buffer + 5);
+                continue;
             }
-            debug_print("Commande envoyée", sockfd);
-
-            // Lire les réponses du serveur
-            while (1) {
-                ssize_t n = read(sockfd, response, BUFFER_SIZE - 1);
-                if (n < 0) {
-                    perror("Échec de la lecture de la réponse");
-                    break;
-                }
-                if (n == 0) {
-                    debug_print("Serveur déconnecté", sockfd);
-                    break;
-                }
-                response[n] = '\0';
-                printf("%s", response);
-                // Arrêter la lecture si la réponse est complète
-                if (strstr(response, "END\n") || strstr(response, "Réservation confirmée") || 
-                    strstr(response, "Annulation confirmée") || strstr(response, "Succès : Facture") || 
-                    strstr(response, "Impossible : Aucune facture") || strstr(response, "Erreur")) {
-                    break;
-                }
+            printf("%s", buffer);
+            if (strstr(buffer, "END\n") != NULL) {
+                break;
             }
         }
-    } else {
-        // Gérer les communications UDP
-        char command[BUFFER_SIZE];
-        char response[MAX_DATAGRAM_SIZE];
-        socklen_t serv_len = sizeof(serv_addr);
-        uint32_t seq = 0;
-
-        while (1) {
-            // Lire la commande de l'utilisateur
-            printf("Entrez une commande (LIST, RESERVER <ref> <nb> <agence>, ANNULER <ref> <nb> <agence>, FACTURE <agence>, ou quit pour quitter) : ");
-            if (fgets(command, sizeof(command), stdin) == NULL) {
-                break;
+    } else { // UDP
+        printf("\nVols disponibles\n");
+        // Send a single LIST request
+        ssize_t n = send_udp_request(sockfd, &serv_addr, buffer, len, buffer, BUFFER_SIZE);
+        if (n < 0) {
+            close(sockfd);
+            return 1;
+        }
+        // Keep receiving responses with the same seq until END
+        while (strncmp(buffer, "END", 3) != 0) {
+            printf("%s", buffer);
+            // Receive next packet without sending a new LIST request
+            struct sockaddr_in from_addr;
+            socklen_t from_len = sizeof(from_addr);
+            struct timeval tv = { UDP_TIMEOUT_SEC, 0 };
+            fd_set readfds;
+            FD_ZERO(&readfds);
+            FD_SET(sockfd, &readfds);
+            int ready = select(sockfd + 1, &readfds, NULL, NULL, &tv);
+            if (ready < 0) {
+                perror("Error in select");
+                close(sockfd);
+                return 1;
             }
-            command[strcspn(command, "\n")] = '\0';
-            if (strcmp(command, "quit") == 0) {
-                break;
+            if (ready == 0) {
+                printf("Timeout waiting for next LIST response\n");
+                close(sockfd);
+                return 1;
             }
-
-            // Préparer le datagramme UDP
-            UdpHeader header = { seq++, "", (uint32_t)strlen(command) };
-            strncpy(header.type, strncmp(command, "LIST", 4) == 0 ? "LIST" :
-                                  strncmp(command, "RESERVER", 8) == 0 ? "RSRV" :
-                                  strncmp(command, "ANNULER", 7) == 0 ? "ANUL" :
-                                  strncmp(command, "FACTURE", 7) == 0 ? "FACT" : "ERR", 5);
-            char packet[MAX_DATAGRAM_SIZE];
-            memcpy(packet, &header, sizeof(UdpHeader));
-            memcpy(packet + sizeof(UdpHeader), command, strlen(command));
-
-            // Envoyer le datagramme
-            if (sendto(sockfd, packet, sizeof(UdpHeader) + strlen(command), 0, (struct sockaddr *)&serv_addr, serv_len) < 0) {
-                perror("Échec de l'envoi de la commande");
-                continue;
-            }
-            debug_print("Commande UDP envoyée", sockfd);
-
-            // Recevoir la réponse
-            ssize_t n = recvfrom(sockfd, response, MAX_DATAGRAM_SIZE, 0, (struct sockaddr *)&serv_addr, &serv_len);
+            n = recvfrom(sockfd, buffer, MAX_DATAGRAM_SIZE, 0, (struct sockaddr *)&from_addr, &from_len);
             if (n < 0) {
-                perror("Échec de la réception de la réponse");
+                perror("Failed to receive UDP packet");
+                close(sockfd);
+                return 1;
+            }
+            if (n < sizeof(UdpHeader)) {
+                printf("Received datagram too short\n");
                 continue;
             }
-            if (n >= sizeof(UdpHeader)) {
-                UdpHeader resp_header;
-                memcpy(&resp_header, response, sizeof(UdpHeader));
-                char *payload = response + sizeof(UdpHeader);
-                payload[resp_header.len] = '\0';
-                printf("%s", payload);
+            UdpHeader recv_header;
+            memcpy(&recv_header, buffer, sizeof(UdpHeader));
+            size_t payload_len = n - sizeof(UdpHeader);
+            if (payload_len > BUFFER_SIZE - 1) {
+                payload_len = BUFFER_SIZE - 1;
+            }
+            memcpy(buffer, buffer + sizeof(UdpHeader), payload_len);
+            buffer[payload_len] = '\0';
+            if (strncmp(recv_header.type, "WAIT", 4) == 0) {
+                printf("%s\n", buffer);
+                continue;
+            }
+        }
+        printf("END\n");
+    }
+    break;
+}
+
+            case 2: {
+                int ref, nb;
+                printf("Entrez la référence du vol :");
+                if (scanf("%d", &ref) != 1 || ref < 0) {
+                    printf("Invalid flight reference\n");
+                    while (getchar() != '\n');
+                    continue;
+                }
+                printf("Entrez le nombre de places :");
+                if (scanf("%d", &nb) != 1 || nb <= 0) {
+                    printf("Invalid number of seats\n");
+                    while (getchar() != '\n');
+                    continue;
+                }
+                while (getchar() != '\n');
+                snprintf(buffer, BUFFER_SIZE, "RESERVER %d %d %s", ref, nb, agence);
+                size_t len = strlen(buffer);
+                if (proto == PROTO_TCP) {
+                    if (write(sockfd, buffer, len) != len) {
+                        perror("Failed to send reservation");
+                        close(sockfd);
+                        return 1;
+                    }
+                } else { // UDP
+                    ssize_t n = send_udp_request(sockfd, &serv_addr, buffer, len, buffer, BUFFER_SIZE);
+                    if (n < 0) {
+                        close(sockfd);
+                        return 1;
+                    }
+                }
+                break;
+            }
+
+            case 3: {
+                int ref, nb;
+                printf("Entrez la référence du vol a annuler : ");
+                if (scanf("%d", &ref) != 1 || ref < 0) {
+                    printf("Invalid flight reference\n");
+                    while (getchar() != '\n');
+                    continue;
+                }
+                printf("Entrez le nombre de places a annuler:");
+                if (scanf("%d", &nb) != 1 || nb <= 0) {
+                    printf("Invalid number of seats\n");
+                    while (getchar() != '\n');
+                    continue;
+                }
+                while (getchar() != '\n');
+                snprintf(buffer, BUFFER_SIZE, "ANNULER %d %d %s", ref, nb, agence);
+                size_t len = strlen(buffer);
+                if (proto == PROTO_TCP) {
+                    if (write(sockfd, buffer, len) != len) {
+                        perror("Failed to send cancellation");
+                        close(sockfd);
+                        return 1;
+                    }
+                } else { // UDP
+                    ssize_t n = send_udp_request(sockfd, &serv_addr, buffer, len, buffer, BUFFER_SIZE);
+                    if (n < 0) {
+                        close(sockfd);
+                        return 1;
+                    }
+                }
+                break;
+            }
+
+            case 4: {
+                snprintf(buffer, BUFFER_SIZE, "FACTURE %s", agence);
+                size_t len = strlen(buffer);
+                if (proto == PROTO_TCP) {
+                    if (write(sockfd, buffer, len) != len) {
+                        perror("Failed to send facture request");
+                        close(sockfd);
+                        return 1;
+                    }
+                } else { // UDP
+                    ssize_t n = send_udp_request(sockfd, &serv_addr, buffer, len, buffer, BUFFER_SIZE);
+                    if (n < 0) {
+                        close(sockfd);
+                        return 1;
+                    }
+                }
+                break;
+            }
+
+            default:
+                printf("Invalid choice\n");
+                continue;
+        }
+
+        if (choix != 1) {
+            if (proto == PROTO_TCP) {
+                while (1) {
+                    ssize_t n = read(sockfd, buffer, BUFFER_SIZE - 1);
+                    if (n < 0) {
+                        perror("Error reading response");
+                        close(sockfd);
+                        return 1;
+                    }
+                    if (n == 0) {
+                        printf("Server closed connection\n");
+                        close(sockfd);
+                        return 1;
+                    }
+                    buffer[n] = '\0';
+                    if (strncmp(buffer, "WAIT", 4) == 0) {
+                        printf("%s\n", buffer + 5);
+                        continue;
+                    }
+                    printf("\nResponse:\n%s\n", buffer);
+                    break;
+                }
+            } else { // UDP response already handled in send_udp_request
+                printf("\nResponse:\n%s\n", buffer);
             }
         }
     }
 
-    // Fermer le socket
     close(sockfd);
-    debug_print("Socket client fermé", sockfd);
+    printf("Connection closed\n");
     return 0;
 }
