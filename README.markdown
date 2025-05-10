@@ -63,8 +63,5 @@ Flight Reservation System is a C-based client-server application developed by Ma
 - **Mohamed Houssem Salhi**
 - **Jihed Mekni**
 
-## License
-This project is licensed under the MIT License. See the `LICENSE` file for details.
-
 ## Acknowledgments
 Developed as part of the System and Network Programming course at the National Engineering School of Carthage, University of Carthage, for the academic year 2024-2025.
