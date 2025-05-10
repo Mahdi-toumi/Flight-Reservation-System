@@ -5,33 +5,114 @@
 #include <netinet/in.h>
 #include <errno.h>
 #include <pthread.h>
+#include <time.h>
+#include <arpa/inet.h>
 
 #define PORT 8080
 #define BUFFER_SIZE 1024
+#define MAX_DATAGRAM_SIZE 512
 #define VOL_FILE "vols.txt"
 #define HISTO_FILE "histo.txt"
 #define FACTURE_FILE "facture.txt"
+
+typedef enum { PROTO_TCP, PROTO_UDP } Protocol;
 
 // Global mutexes for file access
 pthread_mutex_t vols_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t histo_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t facture_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-void logHisto(int ref, const char *agence, const char *operation, int valeur, const char *resultat) {
-    pthread_mutex_lock(&histo_mutex);
+// UDP message header
+typedef struct {
+    uint32_t seq; // Sequence number
+    char type[5]; // Message type (e.g., LIST, WAIT) + null terminator
+    uint32_t len; // Payload length
+} UdpHeader;
+
+// Print debug message with timestamp
+void debug_print(const char *msg, const struct sockaddr_in *cli_addr, int sockfd) {
+    time_t now = time(NULL);
+    struct tm *t = localtime(&now);
+    char time_str[20];
+    strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", t);
+    
+    if (cli_addr) {
+        char client_ip[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &cli_addr->sin_addr, client_ip, INET_ADDRSTRLEN);
+        printf("[DEBUG] %s: %s (client %s:%d)\n", time_str, msg, client_ip, ntohs(cli_addr->sin_port));
+    } else if (sockfd >= 0) {
+        printf("[DEBUG] %s: %s (socket %d)\n", time_str, msg, sockfd);
+    } else {
+        printf("[DEBUG] %s: %s\n", time_str, msg);
+    }
+}
+
+int create_socket(Protocol proto) {
+    int sockfd = socket(AF_INET, proto == PROTO_TCP ? SOCK_STREAM : SOCK_DGRAM, 0);
+    if (sockfd < 0) {
+        perror("Failed to create socket");
+        return -1;
+    }
+    int opt = 1;
+    if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+        perror("Failed to set socket options");
+        close(sockfd);
+        return -1;
+    }
+    debug_print("Socket created successfully", NULL, sockfd);
+    return sockfd;
+}
+
+// Send waiting message to client
+void send_wait_message(int sock, struct sockaddr_in *cli_addr, socklen_t cli_len, const char *resource, Protocol proto, uint32_t seq) {
+    char msg[BUFFER_SIZE];
+    snprintf(msg, sizeof(msg), "WAIT Waiting: another client is accessing %s", resource);
+    debug_print("Sending wait message", cli_addr, sock);
+    if (proto == PROTO_TCP) {
+        if (write(sock, msg, strlen(msg)) < 0) {
+            perror("Failed to send wait message");
+        }
+    } else {
+        UdpHeader header = { seq, "WAIT", (uint32_t)strlen(msg) };
+        char packet[MAX_DATAGRAM_SIZE];
+        memcpy(packet, &header, sizeof(UdpHeader));
+        memcpy(packet + sizeof(UdpHeader), msg, strlen(msg));
+        if (sendto(sock, packet, sizeof(UdpHeader) + strlen(msg), 0, (struct sockaddr *)cli_addr, cli_len) < 0) {
+            perror("Failed to send wait message via UDP");
+        }
+    }
+}
+
+void logHisto(int sock, struct sockaddr_in *cli_addr, socklen_t cli_len, int ref, const char *agence, const char *operation, int valeur, const char *resultat, Protocol proto, uint32_t seq) {
+    char debug_msg[BUFFER_SIZE];
+    snprintf(debug_msg, sizeof(debug_msg), "Logging history: ref=%d, agency=%s, op=%s, value=%d, result=%s", ref, agence, operation, valeur, resultat);
+    debug_print(debug_msg, cli_addr, sock);
+    
+    if (pthread_mutex_trylock(&histo_mutex) != 0) {
+        send_wait_message(sock, cli_addr, cli_len, "history file", proto, seq);
+        pthread_mutex_lock(&histo_mutex);
+    }
     FILE *f = fopen(HISTO_FILE, "a");
     if (!f) {
-        perror("Erreur ouverture histo.txt");
+        perror("Failed to open history file");
         pthread_mutex_unlock(&histo_mutex);
         return;
     }
     fprintf(f, "%d %s %s %d %s\n", ref, agence, operation, valeur, resultat);
     fclose(f);
+    debug_print("History logged successfully", cli_addr, sock);
     pthread_mutex_unlock(&histo_mutex);
 }
 
-void updateFacture(const char *agence, int montant) {
-    pthread_mutex_lock(&facture_mutex);
+void updateFacture(int sock, struct sockaddr_in *cli_addr, socklen_t cli_len, const char *agence, int montant, Protocol proto, uint32_t seq) {
+    char debug_msg[BUFFER_SIZE];
+    snprintf(debug_msg, sizeof(debug_msg), "Updating invoice for agency %s, amount=%d", agence, montant);
+    debug_print(debug_msg, cli_addr, sock);
+    
+    if (pthread_mutex_trylock(&facture_mutex) != 0) {
+        send_wait_message(sock, cli_addr, cli_len, "invoice file", proto, seq);
+        pthread_mutex_lock(&facture_mutex);
+    }
     FILE *f = fopen(FACTURE_FILE, "r");
     FILE *tmp = fopen("temp_facture.txt", "w");
     char line[BUFFER_SIZE];
@@ -40,7 +121,7 @@ void updateFacture(const char *agence, int montant) {
     if (!f || !tmp) {
         if (f) fclose(f);
         if (tmp) fclose(tmp);
-        perror("Erreur manipulation facture");
+        perror("Failed to access invoice files");
         pthread_mutex_unlock(&facture_mutex);
         return;
     }
@@ -63,49 +144,101 @@ void updateFacture(const char *agence, int montant) {
     fclose(f);
     fclose(tmp);
     if (remove(FACTURE_FILE) != 0 || rename("temp_facture.txt", FACTURE_FILE) != 0) {
-        perror("Erreur mise à jour facture");
+        perror("Failed to update invoice file");
     }
+    debug_print("Invoice updated successfully", cli_addr, sock);
     pthread_mutex_unlock(&facture_mutex);
 }
 
-void sendVols(int sock) {
-    pthread_mutex_lock(&vols_mutex);
+void sendVols(int sock, struct sockaddr_in *cli_addr, socklen_t cli_len, Protocol proto, uint32_t seq) {
+    debug_print("Sending flight list", cli_addr, sock);
+    if (pthread_mutex_trylock(&vols_mutex) != 0) {
+        send_wait_message(sock, cli_addr, cli_len, "flight list", proto, seq);
+        pthread_mutex_lock(&vols_mutex);
+    }
     FILE *f = fopen(VOL_FILE, "r");
     if (!f) {
-        char err[] = "Erreur : Impossible d’ouvrir vols.txt\n";
-        write(sock, err, strlen(err));
+        char err[] = "Error: Unable to open flights file\n";
+        debug_print("Failed to open flights file", cli_addr, sock);
+        if (proto == PROTO_TCP) {
+            write(sock, err, strlen(err));
+        } else {
+            UdpHeader header = { seq, "ERR", (uint32_t)strlen(err) };
+            char packet[MAX_DATAGRAM_SIZE];
+            memcpy(packet, &header, sizeof(UdpHeader));
+            memcpy(packet + sizeof(UdpHeader), err, strlen(err));
+            sendto(sock, packet, sizeof(UdpHeader) + strlen(err), 0, (struct sockaddr *)cli_addr, cli_len);
+        }
         pthread_mutex_unlock(&vols_mutex);
         return;
     }
     char line[BUFFER_SIZE];
-    printf("Envoi de la liste des vols\n"); // Debug output
     while (fgets(line, sizeof(line), f)) {
-        if (write(sock, line, strlen(line)) < 0) {
-            perror("Erreur envoi ligne vol");
-            fclose(f);
-            pthread_mutex_unlock(&vols_mutex);
-            return;
+        if (proto == PROTO_TCP) {
+            if (write(sock, line, strlen(line)) < 0) {
+                perror("Failed to send flight line");
+                fclose(f);
+                pthread_mutex_unlock(&vols_mutex);
+                return;
+            }
+        } else {
+            UdpHeader header = { seq, "LIST", (uint32_t)strlen(line) };
+            char packet[MAX_DATAGRAM_SIZE];
+            memcpy(packet, &header, sizeof(UdpHeader));
+            memcpy(packet + sizeof(UdpHeader), line, strlen(line));
+            if (sendto(sock, packet, sizeof(UdpHeader) + strlen(line), 0, (struct sockaddr *)cli_addr, cli_len) < 0) {
+                perror("Failed to send flight line via UDP");
+                fclose(f);
+                pthread_mutex_unlock(&vols_mutex);
+                return;
+            }
         }
     }
-    if (write(sock, "END\n", 4) != 4) {
-        perror("Erreur envoi marqueur END");
+    char end[] = "END\n";
+    if (proto == PROTO_TCP) {
+        if (write(sock, end, strlen(end)) != strlen(end)) {
+            perror("Failed to send END marker");
+        }
     } else {
-        printf("Marqueur END envoyé\n"); // Debug output
+        UdpHeader header = { seq, "END", (uint32_t)strlen(end) };
+        char packet[MAX_DATAGRAM_SIZE];
+        memcpy(packet, &header, sizeof(UdpHeader));
+        memcpy(packet + sizeof(UdpHeader), end, strlen(end));
+        if (sendto(sock, packet, sizeof(UdpHeader) + strlen(end), 0, (struct sockaddr *)cli_addr, cli_len) < 0) {
+            perror("Failed to send END marker via UDP");
+        }
     }
+    debug_print("Flight list sent successfully", cli_addr, sock);
     fclose(f);
     pthread_mutex_unlock(&vols_mutex);
 }
 
-void reserverVol(int sock, int ref, int nb_places, const char *agence) {
-    pthread_mutex_lock(&vols_mutex);
+void reserverVol(int sock, struct sockaddr_in *cli_addr, socklen_t cli_len, int ref, int nb_places, const char *agence, Protocol proto, uint32_t seq) {
+    char debug_msg[BUFFER_SIZE];
+    snprintf(debug_msg, sizeof(debug_msg), "Processing reservation: ref=%d, seats=%d, agency=%s", ref, nb_places, agence);
+    debug_print(debug_msg, cli_addr, sock);
+    
+    if (pthread_mutex_trylock(&vols_mutex) != 0) {
+        send_wait_message(sock, cli_addr, cli_len, "flight list", proto, seq);
+        pthread_mutex_lock(&vols_mutex);
+    }
     FILE *f = fopen(VOL_FILE, "r");
     FILE *tmp = fopen("temp.txt", "w");
     char line[BUFFER_SIZE];
     int trouvé = 0;
 
     if (!f || !tmp) {
-        char err[] = "Erreur : Fichier vols.txt introuvable\n";
-        write(sock, err, strlen(err));
+        char err[] = "Error: Unable to access flights file\n";
+        debug_print("Failed to access flights file", cli_addr, sock);
+        if (proto == PROTO_TCP) {
+            write(sock, err, strlen(err));
+        } else {
+            UdpHeader header = { seq, "ERR", (uint32_t)strlen(err) };
+            char packet[MAX_DATAGRAM_SIZE];
+            memcpy(packet, &header, sizeof(UdpHeader));
+            memcpy(packet + sizeof(UdpHeader), err, strlen(err));
+            sendto(sock, packet, sizeof(UdpHeader) + strlen(err), 0, (struct sockaddr *)cli_addr, cli_len);
+        }
         if (f) fclose(f);
         if (tmp) fclose(tmp);
         pthread_mutex_unlock(&vols_mutex);
@@ -122,20 +255,36 @@ void reserverVol(int sock, int ref, int nb_places, const char *agence) {
                     places -= nb_places;
                     fprintf(tmp, "%d %s %d %d\n", r, dest, places, prix);
                     char msg[BUFFER_SIZE];
-                    snprintf(msg, sizeof(msg), "Réservation confirmée : %d places vol %d\n", nb_places, ref);
-                    if (write(sock, msg, strlen(msg)) < 0) {
-                        perror("Erreur envoi confirmation");
+                    snprintf(msg, sizeof(msg), "Reservation confirmed: %d seats on flight %d\n", nb_places, ref);
+                    if (proto == PROTO_TCP) {
+                        if (write(sock, msg, strlen(msg)) < 0) {
+                            perror("Failed to send confirmation");
+                        }
+                    } else {
+                        UdpHeader header = { seq, "RSRV", (uint32_t)strlen(msg) };
+                        char packet[MAX_DATAGRAM_SIZE];
+                        memcpy(packet, &header, sizeof(UdpHeader));
+                        memcpy(packet + sizeof(UdpHeader), msg, strlen(msg));
+                        sendto(sock, packet, sizeof(UdpHeader) + strlen(msg), 0, (struct sockaddr *)cli_addr, cli_len);
                     }
-                    logHisto(ref, agence, "RESERVATION", nb_places, "OK");
-                    updateFacture(agence, nb_places * prix);
+                    logHisto(sock, cli_addr, cli_len, ref, agence, "RESERVATION", nb_places, "OK", proto, seq);
+                    updateFacture(sock, cli_addr, cli_len, agence, nb_places * prix, proto, seq);
                 } else {
                     fprintf(tmp, "%s", line);
                     char msg[BUFFER_SIZE];
-                    snprintf(msg, sizeof(msg), "Erreur : places insuffisantes (%d dispo)\n", places);
-                    if (write(sock, msg, strlen(msg)) < 0) {
-                        perror("Erreur envoi erreur places");
+                    snprintf(msg, sizeof(msg), "Error: only %d seats available\n", places);
+                    if (proto == PROTO_TCP) {
+                        if (write(sock, msg, strlen(msg)) < 0) {
+                            perror("Failed to send error message");
+                        }
+                    } else {
+                        UdpHeader header = { seq, "ERR", (uint32_t)strlen(msg) };
+                        char packet[MAX_DATAGRAM_SIZE];
+                        memcpy(packet, &header, sizeof(UdpHeader));
+                        memcpy(packet + sizeof(UdpHeader), msg, strlen(msg));
+                        sendto(sock, packet, sizeof(UdpHeader) + strlen(msg), 0, (struct sockaddr *)cli_addr, cli_len);
                     }
-                    logHisto(ref, agence, "RESERVATION", nb_places, "ECHEC");
+                    logHisto(sock, cli_addr, cli_len, ref, agence, "RESERVATION", nb_places, "FAILED", proto, seq);
                 }
             } else {
                 fprintf(tmp, "%s", line);
@@ -148,30 +297,57 @@ void reserverVol(int sock, int ref, int nb_places, const char *agence) {
     fclose(f);
     fclose(tmp);
     if (!trouvé) {
-        char msg[] = "Référence de vol introuvable\n";
-        if (write(sock, msg, strlen(msg)) < 0) {
-            perror("Erreur envoi erreur ref");
+        char msg[] = "Error: Flight reference not found\n";
+        debug_print("Flight reference not found", cli_addr, sock);
+        if (proto == PROTO_TCP) {
+            if (write(sock, msg, strlen(msg)) < 0) {
+                perror("Failed to send error message");
+            }
+        } else {
+            UdpHeader header = { seq, "ERR", (uint32_t)strlen(msg) };
+            char packet[MAX_DATAGRAM_SIZE];
+            memcpy(packet, &header, sizeof(UdpHeader));
+            memcpy(packet + sizeof(UdpHeader), msg, strlen(msg));
+            sendto(sock, packet, sizeof(UdpHeader) + strlen(msg), 0, (struct sockaddr *)cli_addr, cli_len);
         }
         remove("temp.txt");
-        logHisto(ref, agence, "RESERVATION", nb_places, "INCONNU");
+        logHisto(sock, cli_addr, cli_len, ref, agence, "RESERVATION", nb_places, "UNKNOWN", proto, seq);
     } else {
         if (remove(VOL_FILE) != 0 || rename("temp.txt", VOL_FILE) != 0) {
-            perror("Erreur mise à jour vols");
+            perror("Failed to update flights file");
         }
+        debug_print("Flights file updated successfully", cli_addr, sock);
     }
     pthread_mutex_unlock(&vols_mutex);
 }
 
-void annulerVol(int sock, int ref, int nb_places, const char *agence) {
-    pthread_mutex_lock(&vols_mutex);
+void annulerVol(int sock, struct sockaddr_in *cli_addr, socklen_t cli_len, int ref, int nb_places, const char *agence, Protocol proto, uint32_t seq) {
+    char debug_msg[BUFFER_SIZE];
+    snprintf(debug_msg, sizeof(debug_msg), "Processing cancellation: ref=%d, seats=%d, agency=%s", ref, nb_places, agence);
+    debug_print(debug_msg, cli_addr, sock);
+    
+    if (pthread_mutex_trylock(&vols_mutex) != 0) {
+        send_wait_message(sock, cli_addr, cli_len, "flight list", proto, seq);
+        pthread_mutex_lock(&vols_mutex);
+    }
     FILE *f = fopen(VOL_FILE, "r");
     FILE *tmp = fopen("temp.txt", "w");
     char line[BUFFER_SIZE];
     int trouvé = 0;
+    int prix_vol = 0; // Pour stocker le prix du vol annulé
 
     if (!f || !tmp) {
-        char err[] = "Erreur : Fichier vols.txt introuvable\n";
-        write(sock, err, strlen(err));
+        char err[] = "Error: Unable to access flights file\n";
+        debug_print("Failed to access flights file", cli_addr, sock);
+        if (proto == PROTO_TCP) {
+            write(sock, err, strlen(err));
+        } else {
+            UdpHeader header = { seq, "ERR", (uint32_t)strlen(err) };
+            char packet[MAX_DATAGRAM_SIZE];
+            memcpy(packet, &header, sizeof(UdpHeader));
+            memcpy(packet + sizeof(UdpHeader), err, strlen(err));
+            sendto(sock, packet, sizeof(UdpHeader) + strlen(err), 0, (struct sockaddr *)cli_addr, cli_len);
+        }
         if (f) fclose(f);
         if (tmp) fclose(tmp);
         pthread_mutex_unlock(&vols_mutex);
@@ -183,17 +359,46 @@ void annulerVol(int sock, int ref, int nb_places, const char *agence) {
         char dest[50];
         if (sscanf(line, "%d %s %d %d", &r, dest, &places, &prix) == 4) {
             if (r == ref) {
-                trouvé = 1;
-                places += nb_places;
-                fprintf(tmp, "%d %s %d %d\n", r, dest, places, prix);
-                int penalite = (int)(nb_places * prix * 0.1);
-                updateFacture(agence, penalite);
-                char msg[BUFFER_SIZE];
-                snprintf(msg, sizeof(msg), "Annulation de %d places vol %d (pénalité %d€)\n", nb_places, ref, penalite);
-                if (write(sock, msg, strlen(msg)) < 0) {
-                    perror("Erreur envoi confirmation annulation");
+                trouvé = 0;
+                if (places >= 0) { // Vérifie que les places sont valides après annulation
+                    trouvé = 1;
+                    places += nb_places;
+                    prix_vol = prix; // Stocke le prix par siège
+                    fprintf(tmp, "%d %s %d %d\n", r, dest, places, prix);
+                    int montant_reserve = nb_places * prix; // Montant total réservé
+                    int penalite = (int)(montant_reserve * 0.1); // Pénalité de 10%
+                    updateFacture(sock, cli_addr, cli_len, agence, -montant_reserve + penalite, proto, seq); // Soustrait le montant réservé et ajoute la pénalité
+                    char msg[BUFFER_SIZE];
+                    snprintf(msg, sizeof(msg), "Cancellation confirmed: %d seats on flight %d (penalty %d Dt)\n", nb_places, ref, penalite);
+                    if (proto == PROTO_TCP) {
+                        if (write(sock, msg, strlen(msg)) < 0) {
+                            perror("Failed to send cancellation confirmation");
+                        }
+                    } else {
+                        UdpHeader header = { seq, "ANUL", (uint32_t)strlen(msg) };
+                        char packet[MAX_DATAGRAM_SIZE];
+                        memcpy(packet, &header, sizeof(UdpHeader));
+                        memcpy(packet + sizeof(UdpHeader), msg, strlen(msg));
+                        sendto(sock, packet, sizeof(UdpHeader) + strlen(msg), 0, (struct sockaddr *)cli_addr, cli_len);
+                    }
+                    logHisto(sock, cli_addr, cli_len, ref, agence, "CANCELLATION", nb_places, "OK", proto, seq);
+                } else {
+                    fprintf(tmp, "%s", line);
+                    char msg[BUFFER_SIZE];
+                    snprintf(msg, sizeof(msg), "Error: Invalid number of seats for cancellation\n");
+                    if (proto == PROTO_TCP) {
+                        if (write(sock, msg, strlen(msg)) < 0) {
+                            perror("Failed to send error message");
+                        }
+                    } else {
+                        UdpHeader header = { seq, "ERR", (uint32_t)strlen(msg) };
+                        char packet[MAX_DATAGRAM_SIZE];
+                        memcpy(packet, &header, sizeof(UdpHeader));
+                        memcpy(packet + sizeof(UdpHeader), msg, strlen(msg));
+                        sendto(sock, packet, sizeof(UdpHeader) + strlen(msg), 0, (struct sockaddr *)cli_addr, cli_len);
+                    }
+                    logHisto(sock, cli_addr, cli_len, ref, agence, "CANCELLATION", nb_places, "FAILED", proto, seq);
                 }
-                logHisto(ref, agence, "ANNULATION", nb_places, "OK");
             } else {
                 fprintf(tmp, "%s", line);
             }
@@ -205,22 +410,39 @@ void annulerVol(int sock, int ref, int nb_places, const char *agence) {
     fclose(f);
     fclose(tmp);
     if (!trouvé) {
-        char msg[] = "Référence de vol introuvable\n";
-        if (write(sock, msg, strlen(msg)) < 0) {
-            perror("Erreur envoi erreur ref");
+        char msg[] = "Error: Flight reference not found\n";
+        debug_print("Flight reference not found", cli_addr, sock);
+        if (proto == PROTO_TCP) {
+            if (write(sock, msg, strlen(msg)) < 0) {
+                perror("Failed to send error message");
+            }
+        } else {
+            UdpHeader header = { seq, "ERR", (uint32_t)strlen(msg) };
+            char packet[MAX_DATAGRAM_SIZE];
+            memcpy(packet, &header, sizeof(UdpHeader));
+            memcpy(packet + sizeof(UdpHeader), msg, strlen(msg));
+            sendto(sock, packet, sizeof(UdpHeader) + strlen(msg), 0, (struct sockaddr *)cli_addr, cli_len);
         }
         remove("temp.txt");
-        logHisto(ref, agence, "ANNULATION", nb_places, "INCONNU");
+        logHisto(sock, cli_addr, cli_len, ref, agence, "CANCELLATION", nb_places, "UNKNOWN", proto, seq);
     } else {
         if (remove(VOL_FILE) != 0 || rename("temp.txt", VOL_FILE) != 0) {
-            perror("Erreur mise à jour vols");
+            perror("Failed to update flights file");
         }
+        debug_print("Flights file updated successfully", cli_addr, sock);
     }
     pthread_mutex_unlock(&vols_mutex);
 }
 
-void consulterFacture(int sock, const char *agence) {
-    pthread_mutex_lock(&facture_mutex);
+void consulterFacture(int sock, struct sockaddr_in *cli_addr, socklen_t cli_len, const char *agence, Protocol proto, uint32_t seq) {
+    char debug_msg[BUFFER_SIZE];
+    snprintf(debug_msg, sizeof(debug_msg), "Fetching Facture for agency %s", agence);
+    debug_print(debug_msg, cli_addr, sock);
+    
+    if (pthread_mutex_trylock(&facture_mutex) != 0) {
+        send_wait_message(sock, cli_addr, cli_len, "invoice file", proto, seq);
+        pthread_mutex_lock(&facture_mutex);
+    }
     FILE *f = fopen(FACTURE_FILE, "r");
     int found = 0;
     if (f) {
@@ -230,9 +452,17 @@ void consulterFacture(int sock, const char *agence) {
             int montant;
             if (sscanf(line, "%s %d", ag, &montant) == 2 && strcmp(ag, agence) == 0) {
                 char msg[BUFFER_SIZE];
-                snprintf(msg, sizeof(msg), "Facture %s : %d€\n", agence, montant);
-                if (write(sock, msg, strlen(msg)) < 0) {
-                    perror("Erreur envoi facture");
+                snprintf(msg, sizeof(msg), "Facture for %s: %d€\n", agence, montant);
+                if (proto == PROTO_TCP) {
+                    if (write(sock, msg, strlen(msg)) < 0) {
+                        perror("Failed to send Facture");
+                    }
+                } else {
+                    UdpHeader header = { seq, "FACT", (uint32_t)strlen(msg) };
+                    char packet[MAX_DATAGRAM_SIZE];
+                    memcpy(packet, &header, sizeof(UdpHeader));
+                    memcpy(packet + sizeof(UdpHeader), msg, strlen(msg));
+                    sendto(sock, packet, sizeof(UdpHeader) + strlen(msg), 0, (struct sockaddr *)cli_addr, cli_len);
                 }
                 found = 1;
                 break;
@@ -241,92 +471,180 @@ void consulterFacture(int sock, const char *agence) {
         fclose(f);
     }
     if (!found) {
-        char msg[] = "Aucune facture pour cette agence\n";
-        if (write(sock, msg, strlen(msg)) < 0) {
-            perror("Erreur envoi aucune facture");
+        char msg[] = "No invoice found for this agency\n";
+        debug_print("No invoice found", cli_addr, sock);
+        if (proto == PROTO_TCP) {
+            if (write(sock, msg, strlen(msg)) < 0) {
+                perror("Failed to send no-invoice message");
+            }
+        } else {
+            UdpHeader header = { seq, "ERR", (uint32_t)strlen(msg) };
+            char packet[MAX_DATAGRAM_SIZE];
+            memcpy(packet, &header, sizeof(UdpHeader));
+            memcpy(packet + sizeof(UdpHeader), msg, strlen(msg));
+            sendto(sock, packet, sizeof(UdpHeader) + strlen(msg), 0, (struct sockaddr *)cli_addr, cli_len);
         }
     }
+    debug_print("Invoice request processed", cli_addr, sock);
     pthread_mutex_unlock(&facture_mutex);
 }
 
-// Thread function to handle a single client
-void *handle_client(void *arg) {
+// Thread function for TCP clients
+void *handle_tcp_client(void *arg) {
     int newsockfd = *(int *)arg;
-    free(arg); // Free the allocated socket descriptor
+    free(arg);
     char buffer[BUFFER_SIZE];
-
-    printf("Thread démarré pour client (socket %d)\n", newsockfd); // Debug output
+    
+    debug_print("New TCP client thread started", NULL, newsockfd);
 
     while (1) {
         memset(buffer, 0, BUFFER_SIZE);
         ssize_t n = read(newsockfd, buffer, BUFFER_SIZE - 1);
         if (n < 0) {
-            perror("Erreur lecture client");
+            perror("Error reading from client");
             break;
         }
         if (n == 0) {
-            printf("Client déconnecté (socket %d)\n", newsockfd);
+            debug_print("Client disconnected", NULL, newsockfd);
             break;
         }
         buffer[n] = '\0';
-        printf("Commande reçue (socket %d) : %s\n", newsockfd, buffer); // Debug output
+        char debug_msg[BUFFER_SIZE];
+        snprintf(debug_msg, sizeof(debug_msg), "Received command: %s", buffer);
+        debug_print(debug_msg, NULL, newsockfd);
 
         if (strncmp(buffer, "LIST", 4) == 0) {
-            sendVols(newsockfd);
+            sendVols(newsockfd, NULL, 0, PROTO_TCP, 0);
         } else if (strncmp(buffer, "RESERVER", 8) == 0) {
             int ref, nb;
             char agence[50];
             if (sscanf(buffer + 9, "%d %d %s", &ref, &nb, agence) == 3) {
-                reserverVol(newsockfd, ref, nb, agence);
+                reserverVol(newsockfd, NULL, 0, ref, nb, agence, PROTO_TCP, 0);
             } else {
-                char err[] = "Commande RESERVER invalide\n";
+                char err[] = "Invalid RESERVER command\n";
                 write(newsockfd, err, strlen(err));
+                debug_print("Invalid RESERVER command", NULL, newsockfd);
             }
         } else if (strncmp(buffer, "ANNULER", 7) == 0) {
             int ref, nb;
             char agence[50];
             if (sscanf(buffer + 8, "%d %d %s", &ref, &nb, agence) == 3) {
-                annulerVol(newsockfd, ref, nb, agence);
+                annulerVol(newsockfd, NULL, 0, ref, nb, agence, PROTO_TCP, 0);
             } else {
-                char err[] = "Commande ANNULER invalide\n";
+                char err[] = "Invalid ANNULER command\n";
                 write(newsockfd, err, strlen(err));
+                debug_print("Invalid ANNULER command", NULL, newsockfd);
             }
         } else if (strncmp(buffer, "FACTURE", 7) == 0) {
             char ag[50];
             if (sscanf(buffer + 8, "%s", ag) == 1) {
-                consulterFacture(newsockfd, ag);
+                consulterFacture(newsockfd, NULL, 0, ag, PROTO_TCP, 0);
             } else {
-                char err[] = "Commande FACTURE invalide\n";
+                char err[] = "Invalid FACTURE command\n";
                 write(newsockfd, err, strlen(err));
+                debug_print("Invalid FACTURE command", NULL, newsockfd);
             }
         } else {
-            char err[] = "Commande inconnue\n";
+            char err[] = "Unknown command\n";
             write(newsockfd, err, strlen(err));
+            debug_print("Unknown command received", NULL, newsockfd);
         }
     }
 
     close(newsockfd);
-    printf("Thread terminé pour client (socket %d)\n", newsockfd); // Debug output
+    debug_print("TCP client thread terminated", NULL, newsockfd);
     return NULL;
 }
 
-int main() {
+void handle_udp_request(int sockfd, char *buffer, ssize_t n, struct sockaddr_in *cli_addr, socklen_t cli_len) {
+    if (n < sizeof(UdpHeader)) {
+        char err[] = "Datagram too short\n";
+        UdpHeader header = { 0, "ERR", (uint32_t)strlen(err) };
+        char packet[MAX_DATAGRAM_SIZE];
+        memcpy(packet, &header, sizeof(UdpHeader));
+        memcpy(packet + sizeof(UdpHeader), err, strlen(err));
+        sendto(sockfd, packet, sizeof(UdpHeader) + strlen(err), 0, (struct sockaddr *)cli_addr, cli_len);
+        debug_print("Received invalid datagram: too short", cli_addr, sockfd);
+        return;
+    }
+
+    UdpHeader header;
+    memcpy(&header, buffer, sizeof(UdpHeader));
+    char *payload = buffer + sizeof(UdpHeader);
+    payload[header.len] = '\0';
+
+    char debug_msg[BUFFER_SIZE];
+    snprintf(debug_msg, sizeof(debug_msg), "Received UDP command: %s", payload);
+    debug_print(debug_msg, cli_addr, sockfd);
+
+    if (strncmp(payload, "LIST", 4) == 0) {
+        sendVols(sockfd, cli_addr, cli_len, PROTO_UDP, header.seq);
+    } else if (strncmp(payload, "RESERVER", 8) == 0) {
+        int ref, nb;
+        char agence[50];
+        if (sscanf(payload + 9, "%d %d %s", &ref, &nb, agence) == 3) {
+            reserverVol(sockfd, cli_addr, cli_len, ref, nb, agence, PROTO_UDP, header.seq);
+        } else {
+            char err[] = "Invalid RESERVER command\n";
+            UdpHeader header_out = { header.seq, "ERR", (uint32_t)strlen(err) };
+            char packet[MAX_DATAGRAM_SIZE];
+            memcpy(packet, &header_out, sizeof(UdpHeader));
+            memcpy(packet + sizeof(UdpHeader), err, strlen(err));
+            sendto(sockfd, packet, sizeof(UdpHeader) + strlen(err), 0, (struct sockaddr *)cli_addr, cli_len);
+            debug_print("Invalid RESERVER command", cli_addr, sockfd);
+        }
+    } else if (strncmp(payload, "ANNULER", 7) == 0) {
+        int ref, nb;
+        char agence[50];
+        if (sscanf(payload + 8, "%d %d %s", &ref, &nb, agence) == 3) {
+            annulerVol(sockfd, cli_addr, cli_len, ref, nb, agence, PROTO_UDP, header.seq);
+        } else {
+            char err[] = "Invalid ANNULER command\n";
+            UdpHeader header_out = { header.seq, "ERR", (uint32_t)strlen(err) };
+            char packet[MAX_DATAGRAM_SIZE];
+            memcpy(packet, &header_out, sizeof(UdpHeader));
+            memcpy(packet + sizeof(UdpHeader), err, strlen(err));
+            sendto(sockfd, packet, sizeof(UdpHeader) + strlen(err), 0, (struct sockaddr *)cli_addr, cli_len);
+            debug_print("Invalid ANNULER command", cli_addr, sockfd);
+        }
+    } else if (strncmp(payload, "FACTURE", 7) == 0) {
+        char ag[50];
+        if (sscanf(payload + 8, "%s", ag) == 1) {
+            consulterFacture(sockfd, cli_addr, cli_len, ag, PROTO_UDP, header.seq);
+        } else {
+            char err[] = "Invalid FACTURE command\n";
+            UdpHeader header_out = { header.seq, "ERR", (uint32_t)strlen(err) };
+            char packet[MAX_DATAGRAM_SIZE];
+            memcpy(packet, &header_out, sizeof(UdpHeader));
+            memcpy(packet + sizeof(UdpHeader), err, strlen(err));
+            sendto(sockfd, packet, sizeof(UdpHeader) + strlen(err), 0, (struct sockaddr *)cli_addr, cli_len);
+            debug_print("Invalid FACTURE command", cli_addr, sockfd);
+        }
+    } else {
+        char err[] = "Unknown command\n";
+        UdpHeader header_out = { header.seq, "ERR", (uint32_t)strlen(err) };
+        char packet[MAX_DATAGRAM_SIZE];
+        memcpy(packet, &header_out, sizeof(UdpHeader));
+        memcpy(packet + sizeof(UdpHeader), err, strlen(err));
+        sendto(sockfd, packet, sizeof(UdpHeader) + strlen(err), 0, (struct sockaddr *)cli_addr, cli_len);
+        debug_print("Unknown command received", cli_addr, sockfd);
+    }
+}
+
+int main(int argc, char *argv[]) {
+    if (argc != 2 || (strcmp(argv[1], "tcp") != 0 && strcmp(argv[1], "udp") != 0)) {
+        fprintf(stderr, "Usage: %s <tcp|udp>\n", argv[0]);
+        return 1;
+    }
+    Protocol proto = strcmp(argv[1], "tcp") == 0 ? PROTO_TCP : PROTO_UDP;
+
     int sockfd = -1;
     struct sockaddr_in serv_addr, cli_addr;
     socklen_t clilen = sizeof(cli_addr);
 
     // Create socket
-    sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    sockfd = create_socket(proto);
     if (sockfd < 0) {
-        perror("socket");
-        return 1;
-    }
-
-    // Set socket options
-    int opt = 1;
-    if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
-        perror("setsockopt");
-        close(sockfd);
         return 1;
     }
 
@@ -338,49 +656,72 @@ int main() {
 
     // Bind socket
     if (bind(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
-        perror("bind");
+        perror("Failed to bind socket");
         close(sockfd);
         return 1;
     }
+    debug_print("Socket bound successfully", NULL, sockfd);
 
-    // Listen for connections
-    if (listen(sockfd, 5) < 0) {
-        perror("listen");
-        close(sockfd);
-        return 1;
-    }
-    printf("Serveur en attente sur port %d...\n", PORT);
-
-    while (1) {
-        int *newsockfd = malloc(sizeof(int));
-        if (!newsockfd) {
-            perror("Erreur allocation mémoire");
-            continue;
+    if (proto == PROTO_TCP) {
+        // Listen for connections
+        if (listen(sockfd, 5) < 0) {
+            perror("Failed to listen on socket");
+            close(sockfd);
+            return 1;
         }
-        *newsockfd = accept(sockfd, (struct sockaddr *)&cli_addr, &clilen);
-        if (*newsockfd < 0) {
-            perror("accept");
-            free(newsockfd);
-            continue;
-        }
-        printf("Nouveau client connecté (socket %d)\n", *newsockfd);
+        printf("Starting TCP server on port %d...\n", PORT);
+        debug_print("TCP server started", NULL, sockfd);
 
-        // Create a new thread for the client
-        pthread_t thread;
-        if (pthread_create(&thread, NULL, handle_client, newsockfd) != 0) {
-            perror("Erreur création thread");
-            close(*newsockfd);
-            free(newsockfd);
-            continue;
-        }
+        while (1) {
+            int *newsockfd = malloc(sizeof(int));
+            if (!newsockfd) {
+                perror("Failed to allocate memory for client socket");
+                continue;
+            }
+            *newsockfd = accept(sockfd, (struct sockaddr *)&cli_addr, &clilen);
+            if (*newsockfd < 0) {
+                perror("Failed to accept client connection");
+                free(newsockfd);
+                continue;
+            }
+            char debug_msg[BUFFER_SIZE];
+            char client_ip[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &cli_addr.sin_addr, client_ip, INET_ADDRSTRLEN);
+            snprintf(debug_msg, sizeof(debug_msg), "New client connected: %s:%d", client_ip, ntohs(cli_addr.sin_port));
+            debug_print(debug_msg, NULL, *newsockfd);
 
-        // Detach the thread to avoid memory leaks
-        if (pthread_detach(thread) != 0) {
-            perror("Erreur détachement thread");
+            // Create a new thread for the client
+            pthread_t thread;
+            if (pthread_create(&thread, NULL, handle_tcp_client, newsockfd) != 0) {
+                perror("Failed to create client thread");
+                close(*newsockfd);
+                free(newsockfd);
+                continue;
+            }
+
+            // Detach the thread to avoid memory leaks
+            if (pthread_detach(thread) != 0) {
+                perror("Failed to detach client thread");
+            }
+        }
+    } else {
+        printf("Starting UDP server on port %d...\n", PORT);
+        debug_print("UDP server started", NULL, sockfd);
+        char buffer[MAX_DATAGRAM_SIZE];
+
+        while (1) {
+            memset(buffer, 0, MAX_DATAGRAM_SIZE);
+            ssize_t n = recvfrom(sockfd, buffer, MAX_DATAGRAM_SIZE, 0, (struct sockaddr *)&cli_addr, &clilen);
+            if (n < 0) {
+                perror("Failed to receive UDP packet");
+                continue;
+            }
+            handle_udp_request(sockfd, buffer, n, &cli_addr, clilen);
         }
     }
 
     close(sockfd);
+    debug_print("Server socket closed", NULL, sockfd);
     pthread_mutex_destroy(&vols_mutex);
     pthread_mutex_destroy(&histo_mutex);
     pthread_mutex_destroy(&facture_mutex);
