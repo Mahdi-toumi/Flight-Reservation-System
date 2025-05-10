@@ -17,7 +17,7 @@ Flight Reservation System is a C-based client-server application developed by Ma
    - POSIX-compliant system (Linux/UNIX recommended)
    - Standard C libraries
 2. **Setup**:
-   - Clone the repository: `git clone https://github.com/Mahdi-toumi/Reservation-des-vols.git`
+   - Clone the repository: `git clone https://github.com/Mahdi-toumi/Flight-Reservation-System.git`
    - Navigate to the project directory: `cd flight-reservation-system`
 3. **Compile**:
    - Compile server: `gcc server.c -o server -pthread`
